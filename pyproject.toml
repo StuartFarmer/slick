@@ -1,0 +1,41 @@
+[tool.poetry]
+name = "slick-ai"
+version = "0.1.0"
+description = "Slick: simple agentic AI."
+authors = ["Stuart Farmer <stuart@lamden.io>"]
+readme = "README.md"
+license = "MIT"
+packages = [{ include = "slick" }]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=7"
+ruff = ">=0.4"
+mypy = ">=1.5"
+coverage = ">=7.6"
+
+[tool.poetry.scripts]
+slick = "slick.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+select = ["E", "F", "I", "UP", "B", "C4", "RUF"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true

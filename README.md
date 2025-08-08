@@ -23,6 +23,38 @@ print(slick.__version__)
 slick --help
 ```
 
+## LLM decorators
+
+Set your OpenAI API key as an environment variable:
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+Use `llm_step` to turn a function docstring into a prompt. The function body is not executed; the decorator returns the LLM output (optionally parsed to dict or a Pydantic model):
+
+```python
+from pydantic import BaseModel
+from slick import llm_step
+
+class Answer(BaseModel):
+    summary: str
+
+@llm_step(model="gpt-4o-mini")
+def summarize(text: str) -> Answer:
+    """
+    Summarize the following text in one sentence.
+    Text: {{ text }}
+    """
+
+result = summarize("Slick makes LLM steps easy.")
+print(result.summary)
+```
+
+- For async code, use `llm_step_async`.
+- For `dict` returns, the decorator emits a `dict` via LangChain's `StructuredOutputParser`.
+- For `List[...]` returns with `n>1`, multiple generations are returned.
+
 ## Development
 
 ```bash

@@ -10,4 +10,10 @@ try:
 except PackageNotFoundError:  # not installed, e.g., running from source without poetry install
     __version__ = "0.0.0"
 
-__all__ = ["__version__"]
+from .decorators import llm_step, llm_step_async
+
+__all__ = [
+    "__version__",
+    "llm_step",
+    "llm_step_async",
+]

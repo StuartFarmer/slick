@@ -1,156 +1,194 @@
+"""Model primitive: one prompt in, one text response out.
+
+    model = get_model()                  # the resolved default backend
+    model = get_model("claude")          # or by name
+    report = model.call(prompt)          # -> str
+
+Models are CLI-backed (Claude Code headless, codex exec) so calls run on
+subscription billing rather than metered API tokens. Give a model
+everything it needs in the prompt; there is no workspace and no
+conversation. `execute()` is the low-level engine — it takes a workdir
+and a sandbox, which is what a long-running workspace task needs.
+
+Which backend you get, in order: the argument to get_model(), whatever
+set_default() was last called with, $SLICK_BACKEND / $SLICK_MODEL, then
+DEFAULT_BACKEND.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Callable
+import json
 import os
- 
+import shlex
+import subprocess
+import sys
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from pathlib import Path
+
+DEFAULT_CODEX_BIN = "codex"
+DEFAULT_CLAUDE_CMD = "claude -p --output-format text --permission-mode bypassPermissions"
+DEFAULT_BACKEND = "codex"
 
 
- # legacy function-based provider helpers removed; now using class-based providers
-
-# Provider class-based implementation (preferred)
-def _load_provider(name: str):
-    # Lazy import providers to avoid importing optional SDKs at CLI/help time
-    if name == "openai":
-        from .providers.openai import OpenAIProvider
-
-        return OpenAIProvider
-    if name == "anthropic":
-        from .providers.anthropic import AnthropicProvider
-
-        return AnthropicProvider
-    if name == "google":
-        from .providers.google import GoogleProvider
-
-        return GoogleProvider
-    if name == "mistral":
-        from .providers.mistral import MistralProvider
-
-        return MistralProvider
-    if name == "groq":
-        from .providers.groq import GroqProvider
-
-        return GroqProvider
-    if name == "together":
-        from .providers.together import TogetherProvider
-
-        return TogetherProvider
-    if name == "fireworks":
-        from .providers.fireworks import FireworksProvider
-
-        return FireworksProvider
-    raise ValueError(f"Unknown provider: {name}")
+class ModelError(Exception):
+    pass
 
 
-PROVIDERS = {name: name for name in ["openai", "anthropic", "google", "mistral", "groq", "together", "fireworks"]}
+@dataclass(frozen=True)
+class ExecutionResult:
+    """Outcome of one model execution.
 
-# In-memory defaults (overridden by resolution logic)
-_default_model: Optional[str] = None
-_default_provider: Optional[str] = None
-
-
-def set_default_model(model: str, provider: Optional[str] = None) -> None:
-    """Set the global default model and optional provider in-memory.
-
-    TODO: Persist to user config (e.g., ~/.config/slick/config.toml) via a config helper.
+    final_message: the closing message (report, answer).
+    transcript: everything printed while working.
     """
 
-    global _default_model, _default_provider
-    _default_model = model
-    _default_provider = provider
+    final_message: str
+    transcript: str
 
 
-def get_default_model() -> Tuple[Optional[str], Optional[str]]:
-    """Return the currently resolved default (in-memory only for now).
+class Model(ABC):
+    """A CLI-backed model: one prompt in, one text response out."""
 
-    TODO: Load from env, user config, project config if in-memory is not set.
-    """
+    backend: str = "model"
 
-    return _default_model, _default_provider
+    def __init__(self, command: str, model: str | None = None, timeout: int = 3600) -> None:
+        self.command = command
+        self.model = model
+        self.timeout = timeout
 
+    def call(self, prompt: str) -> str:
+        """Single call with complete context, returning the response text."""
+        return self.execute(prompt, sandbox="read-only").final_message
 
-def list_providers() -> List[str]:
-    """Return provider keys supported by this module."""
+    def execute(
+        self,
+        prompt: str,
+        workdir: Path | str | None = None,
+        sandbox: str = "read-only",
+    ) -> ExecutionResult:
+        """Low-level engine: run `prompt` through the CLI. Everything flows
+        through stdout as strings."""
+        if workdir:
+            workdir = Path(workdir)
 
-    return list(PROVIDERS.keys())
+        command = self._command(workdir=workdir, sandbox=sandbox)
+        transcript = self._run_process(command, prompt, workdir=workdir, label=self.backend)
 
+        return ExecutionResult(final_message=self._parse_final(transcript), transcript=transcript)
 
-def list_models(provider: str) -> List[str]:
-    """List models for a given provider (best-effort).
+    @abstractmethod
+    def _command(self, *, workdir: Path | None, sandbox: str) -> list[str]:
+        """The CLI command to execute."""
 
-    This aims to call the provider SDK's list models endpoint if available.
-    For example (to be implemented):
-    - openai: client.models.list()
-    - anthropic: client.models.list() (if available)
-    - google: genai.list_models()
-    - mistral: client.models.list()
-    - cohere: cohere.Client(...).models.list()
-    - groq: client.models.list()
+    def _parse_final(self, transcript: str) -> str:
+        """Extract the final message; defaults to the whole transcript."""
+        return transcript
 
-    TODO: Implement per-provider listing using their official SDKs, with graceful fallbacks.
-    """
+    def _run_process(
+        self,
+        command: list[str],
+        prompt: str,
+        *,
+        workdir: Path | None,
+        label: str,
+    ) -> str:
+        """Feed `prompt` over stdin, return captured stdout."""
+        try:
+            result = subprocess.run(
+                command,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                cwd=workdir,
+                timeout=self.timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ModelError(f"{label} timed out after {self.timeout}s.") from exc
 
-    provider_key = PROVIDERS.get(provider)
-    if not provider_key:
-        raise ValueError(f"Unknown provider: {provider}")
-    try:
-        provider_cls = _load_provider(provider_key)
-        return provider_cls.list_models()
-    except Exception:
-        # Keep errors non-fatal for listing. Callers can inspect logs later.
-        return []
-
-
-def is_available(provider: str) -> bool:
-    """Check if a provider is 'available' (package importable and env keys present).
-
-    TODO: Implement dynamic import check + env key presence.
-    """
-
-    return True
-
-
-def _dynamic_import(dotted_path: str) -> Any:
-    """Import a symbol by dotted path (kept for future use)."""
-
-    module_name, _, attr = dotted_path.rpartition(".")
-    if not module_name:
-        return __import__(dotted_path)
-    mod = __import__(module_name, fromlist=[attr])
-    return getattr(mod, attr)
-
-
-def create_chat_model(
-    model: Optional[str] = None,
-    provider: Optional[str] = None,
-    **kwargs: Any,
-) -> Any:
-    """Create and return a LangChain chat model instance for the resolved provider+model.
-
-    Resolution order (highest first):
-    1) Explicit args (model/provider)
-    2) In-memory defaults (set_default_model)
-    3) Env vars (SLICK_MODEL, SLICK_PROVIDER)
-    4) User config (~/.config/slick/config.toml, or macOS Application Support path)
-    5) Project config (pyproject.toml [tool.slick])
-    6) Built-in default (openai:gpt-4o-mini)
-
-    TODO:
-    - Implement the full resolution order.
-    - Resolve provider from registry if only model provided.
-    - Dynamic import of provider class; instantiate with kwargs and API key from env.
-    - Support Azure deployment nuances (deployment name vs model).
-    - Respect 'streaming' flag if passed; allow callbacks passthrough.
-    """
-
-    # Resolve provider/model
-    sel_provider = provider or _default_provider or os.getenv("SLICK_PROVIDER") or "openai"
-    sel_model = model or _default_model or os.getenv("SLICK_MODEL") or "gpt-4o-mini"
-
-    provider_key = PROVIDERS.get(sel_provider)
-    if not provider_key:
-        raise ValueError(f"Unknown provider: {sel_provider}")
-    provider_cls = _load_provider(provider_key)
-    return provider_cls.make_chat(sel_model, **kwargs)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()[-2000:]
+            raise ModelError(f"{label} failed (exit {result.returncode}): {detail}")
+        return result.stdout
 
 
+class ClaudeModel(Model):
+    """Claude Code headless: the final message is stdout."""
+
+    backend = "claude"
+
+    def __init__(self, command: str = DEFAULT_CLAUDE_CMD, **kwargs) -> None:
+        super().__init__(command, **kwargs)
+
+    def _command(self, *, workdir, sandbox) -> list[str]:
+        command = shlex.split(self.command)
+        if self.model:
+            command.extend(["--model", self.model])
+        return command
+
+
+class CodexModel(Model):
+    """codex exec --json: JSONL events stream on stdout; the final message
+    is the last agent_message event."""
+
+    backend = "codex"
+
+    def __init__(self, command: str = DEFAULT_CODEX_BIN, **kwargs) -> None:
+        super().__init__(command, **kwargs)
+
+    def _command(self, *, workdir, sandbox) -> list[str]:
+        base = [sys.executable, self.command] if self.command.endswith(".py") else [self.command]
+        command = [*base, "exec", "--json", "--sandbox", sandbox]
+        if workdir is not None:
+            command.extend(["--cd", str(workdir)])
+        if self.model:
+            command.extend(["--model", self.model])
+        command.append("-")
+        return command
+
+    def _parse_final(self, transcript: str) -> str:
+        final = ""
+        for line in transcript.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item = event.get("item", {}) if isinstance(event, dict) else {}
+            if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+                final = item.get("text", "")
+        return final
+
+
+BACKENDS: dict[str, type[Model]] = {
+    "claude": ClaudeModel,
+    "codex": CodexModel,
+}
+
+_default_backend: str | None = None
+_default_model: str | None = None
+
+
+def set_default(backend: str | None = None, model: str | None = None) -> None:
+    """Set the process-wide default backend and/or model id."""
+    global _default_backend, _default_model
+    if backend is not None:
+        if backend not in BACKENDS:
+            raise KeyError(f"Unknown backend {backend!r}; expected one of {', '.join(BACKENDS)}.")
+        _default_backend = backend
+    if model is not None:
+        _default_model = model
+
+
+def get_default() -> tuple[str, str | None]:
+    """The backend and model id a bare get_model() would use."""
+    backend = _default_backend or os.getenv("SLICK_BACKEND") or DEFAULT_BACKEND
+    return backend, _default_model or os.getenv("SLICK_MODEL")
+
+
+def get_model(backend: str | None = None, model: str | None = None, **properties) -> Model:
+    """Build a model. Unset arguments fall back to the resolved default."""
+    default_backend, default_model = get_default()
+    backend = backend or default_backend
+    if backend not in BACKENDS:
+        raise KeyError(f"Unknown backend {backend!r}; expected one of {', '.join(BACKENDS)}.")
+    return BACKENDS[backend](model=model or default_model, **properties)

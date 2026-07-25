@@ -15,12 +15,17 @@ dist/
 .venv/
 venv/
 ENV/
+.uv-cache/
+
+# Prompt run logs (see slick.prompts.LOG_DIR)
+logs/
 
 # Test and coverage
 .coverage
 .coverage.*
 .tox/
 .pytest_cache/
+.ruff_cache/
 htmlcov/
 
 # IDE

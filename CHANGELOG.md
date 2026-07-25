@@ -2,5 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0]
+
+Rewritten around one primitive: a prompt is a typed Python function whose
+docstring is a Jinja template.
+
+### Added
+- `@prompt` (`slick.prompts`): parameters as template variables, a Jinja
+  template file as the prompt, return annotation as the output contract, body as
+  optional computed context. Structured returns via `pydantic.TypeAdapter` with
+  a `{{ output_format }}` schema slot and a parse-and-repair loop.
+- `@prompt(template="name.md.j2")` resolves against `TEMPLATE_ROOT` (default
+  `prompts/`), so `{% include %}` and friends compose across files and the
+  docstring is free to be documentation. Templates load per call, so editing one
+  needs no restart. Omitting `template=` keeps the docstring as the template.
+  Inspect either with `.source()` and `.template_name`.
+- Content-addressed run logging under `LOG_DIR`, doubling as a cache.
+- CLI-backed models (`slick.models`): `ClaudeModel`, `CodexModel`, and default
+  resolution via `set_default()` / `$SLICK_BACKEND` / `$SLICK_MODEL`.
+- `slick model` and `slick call` CLI commands.
+
+### Removed
+- `llm_step` / `llm_step_async` and the LangChain dependency. Both were broken:
+  the provider factory's result was discarded and `ChatOpenAI` rebuilt
+  unconditionally, so every call went to OpenAI; and Pydantic returns raised
+  `TemplateSyntaxError` because `str.format` brace-escaping was applied to a
+  Jinja template. Structured output, parsing, and repair now live in `@prompt`,
+  which is what LangChain was there for.
+- `slick.providers` (7 provider classes) — unreachable from the above bug, and
+  superseded by `Model.call(prompt) -> str` as the whole model interface.
+- `slick.config` — TOML/user/project config layers that were stub `return {}`.
+- `slick models list|providers|set-default|show-default|test`. `set-default`
+  could not work: it mutated in-memory state and the process then exited.
+- Streaming. It defaulted to on and wrote to stdout from library code.
+
 ## [0.1.0] - Initial release
 - Initial project scaffolding

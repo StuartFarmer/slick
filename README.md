@@ -225,14 +225,20 @@ settings, and the CLI continue working.
 
 ## Examples
 
-Run the class example without credentials or model calls:
+Run independent examples without credentials or model calls:
 
 ```bash
 python -m examples.question_answerer
+python -m examples.primitives
+python -m examples.self_refine --rounds 2
+python -m examples.react
+python -m examples.tree_of_thoughts
 ```
 
-It uses `Prompt` objects, a backend, and instance-owned history through `ask()`
-and `critique()`. Replace the demo backend with an API or CLI backend for real calls.
+The [examples guide](examples/README.md) covers all nine prompting patterns,
+their application classes, shared Jinja macros, and CLI options. All pattern code
+and templates stay under `examples/`. Pass `--backend openai --model YOUR_MODEL_ID`
+(or another supported backend) for real calls.
 
 The original functional examples also remain available:
 

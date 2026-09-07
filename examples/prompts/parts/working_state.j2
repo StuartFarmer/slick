@@ -1,0 +1,14 @@
+{% macro working_state(state) %}
+Facts:
+{% for fact in state.facts %}
+- {{ fact }}
+{% endfor %}
+Decisions:
+{% for decision in state.decisions %}
+- {{ decision }}
+{% endfor %}
+Unresolved questions:
+{% for question in state.questions %}
+- {{ question }}
+{% endfor %}
+{% endmacro %}

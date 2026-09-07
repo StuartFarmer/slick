@@ -1,0 +1,8 @@
+{% from 'parts/examples.j2' import examples %}
+Original problem: {{ problem }}
+Previously solved subproblems, available for use in this answer:
+{{ examples(solutions) }}
+Solve the current question using the previous answers where relevant:
+{{ question }}
+Return only JSON matching this schema:
+{{ schema | tojson }}

@@ -1,0 +1,7 @@
+{% macro evidence(documents) %}
+{% for document in documents %}
+[{{ document.id }}] {{ document.source }}
+{{ document.text }}
+
+{% endfor %}
+{% endmacro %}

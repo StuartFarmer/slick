@@ -1,0 +1,7 @@
+{% macro instructions(task, audience, constraints) %}
+Task: {{ task }}
+Audience: {{ audience }}
+{% for constraint in constraints %}
+- {{ constraint }}
+{% endfor %}
+{% endmacro %}

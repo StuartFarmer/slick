@@ -1,0 +1,16 @@
+{% include "shared/style.j2" %}
+Revise the answer using the feedback. Return the improved answer only.
+Task: {{ task }}
+Current answer:
+{{ answer }}
+Feedback:
+{{ feedback }}
+
+Earlier drafts:
+{% for revision in revisions %}
+{{ loop.index }}. {{ revision }}
+{% endfor %}
+Earlier feedback:
+{% for item in feedback_history %}
+{{ loop.index }}. {{ item }}
+{% endfor %}

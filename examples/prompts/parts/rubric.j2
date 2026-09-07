@@ -1,0 +1,6 @@
+{% macro rubric(criteria) %}
+Evaluation criteria:
+{% for criterion in criteria %}
+- {{ criterion }}
+{% endfor %}
+{% endmacro %}

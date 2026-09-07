@@ -1,0 +1,8 @@
+{% from "parts/evidence.j2" import evidence %}
+{% include "instructions/research.j2" %}
+Answer the question from these documents. List supporting document IDs in citations.
+If no documents support an answer, say so and use an empty citations list.
+{{ evidence(documents) }}
+Question: {{ question }}
+Return only JSON matching this schema:
+{{ schema | tojson }}

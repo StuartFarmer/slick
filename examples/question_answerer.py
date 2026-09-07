@@ -1,9 +1,10 @@
 """Ordinary application state and methods. Run offline: python -m examples.question_answerer."""
 
 import asyncio
-from pathlib import Path
 
-from slick import Prompt, prompts
+from slick import Prompt
+
+from ._cli import ScriptedBackend, backend_from_args, parser
 
 
 class QuestionAnswerer:
@@ -31,30 +32,26 @@ class QuestionAnswerer:
         return await self.backend.acall(text)
 
 
-class DemoBackend:
-    """Canned responses so the example needs no credentials or network."""
+def main(argv=None):
+    p = parser(__doc__)
+    p.add_argument("--question", action="append", help="repeat to supply conversation turns")
+    p.add_argument("--critique", action="store_true", help="critique the final answer")
+    args = p.parse_args(argv)
+    questions = args.question or ["My name is Ada.", "What is my name?"]
+    responses = [f"Demo answer to: {question}" for question in questions]
+    responses.append("Demo critique: check the answer against the conversation.")
+    backend = backend_from_args(args, p, ScriptedBackend(responses))
+    qa = QuestionAnswerer(backend)
 
-    def __init__(self):
-        self.responses = iter(
-            [
-                "Hello, Ada.",
-                "Your name is Ada.",
-                "The answer is clear; verify it against the original conversation.",
-            ]
-        )
+    async def run():
+        for question in questions:
+            answer = await qa.ask(question)
+            print(answer)
+        if args.critique:
+            print(await qa.critique(answer))
 
-    async def acall(self, text: str) -> str:
-        return next(self.responses)
-
-
-async def main():
-    qa = QuestionAnswerer(DemoBackend())
-    print(await qa.ask("My name is Ada."))
-    answer = await qa.ask("What is my name?")
-    print(answer)
-    print(await qa.critique(answer))
+    asyncio.run(run())
 
 
 if __name__ == "__main__":
-    prompts.TEMPLATE_ROOT = Path(__file__).with_name("prompts")
-    asyncio.run(main())
+    main()

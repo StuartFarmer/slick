@@ -1,0 +1,7 @@
+{% macro observations(records) %}
+{% for record in records %}
+Action: {{ record.action }}
+Observation: {{ record.result }}
+
+{% endfor %}
+{% endmacro %}

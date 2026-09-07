@@ -1,7 +1,6 @@
+{% from "parts/conversation.j2" import conversation %}
 {% include "shared/style.j2" %}
 
-{% for message in messages %}
-{{ message.role }}: {{ message.content }}
-{% endfor %}
+{{ conversation(messages) }}
 
 user: {{ question }}

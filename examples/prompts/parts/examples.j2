@@ -1,0 +1,9 @@
+{% macro examples(pairs) %}
+{% for pair in pairs %}
+Input:
+{{ pair.input }}
+Output:
+{{ pair.output }}
+
+{% endfor %}
+{% endmacro %}

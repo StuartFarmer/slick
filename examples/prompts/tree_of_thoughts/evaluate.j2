@@ -1,0 +1,8 @@
+{% from 'parts/working_state.j2' import working_state %}
+{% from 'parts/rubric.j2' import rubric %}
+Evaluate this candidate solution state on a scale from 0 (unusable) to 1 (excellent).
+{{ working_state(state) }}
+{% if answer is not none %}Proposed final answer: {{ answer }}{% endif %}
+{{ rubric(criteria) }}
+Return only JSON matching this schema:
+{{ schema | tojson }}

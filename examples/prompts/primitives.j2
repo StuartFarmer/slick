@@ -1,0 +1,15 @@
+{% from "parts/conversation.j2" import conversation %}
+{% from "parts/evidence.j2" import evidence %}
+{% from "parts/examples.j2" import examples %}
+{% from "parts/instructions.j2" import instructions %}
+{% from "parts/rubric.j2" import rubric %}
+{% from "parts/working_state.j2" import working_state %}
+{% from "parts/observations.j2" import observations %}
+{% include "instructions/research.j2" %}
+{{ instructions(task, audience, constraints) }}
+{{ conversation(messages) }}
+{{ evidence(documents) }}
+{{ examples(demonstrations) }}
+{{ rubric(criteria) }}
+{{ working_state(state) }}
+{{ observations(records) }}

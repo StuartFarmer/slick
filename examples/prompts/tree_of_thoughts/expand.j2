@@ -1,0 +1,8 @@
+{% from 'parts/working_state.j2' import working_state %}
+Expand this partial solution with up to {{ breadth }} distinct possible next steps.
+Return an empty candidates list if it is a dead end. Each candidate adds exactly
+one step to the current state. Include an answer only if that candidate completes
+the original problem. Otherwise set answer to null.
+{{ working_state(state) }}
+Return only JSON matching this schema:
+{{ schema | tojson }}

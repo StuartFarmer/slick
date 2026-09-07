@@ -1,0 +1,16 @@
+{% from "parts/rubric.j2" import rubric %}
+{% include "shared/style.j2" %}
+Critique the current answer against the task. Identify concrete problems and improvements.
+{{ rubric(criteria) }}
+Task: {{ task }}
+Current answer:
+{{ answer }}
+
+Earlier drafts:
+{% for revision in revisions %}
+{{ loop.index }}. {{ revision }}
+{% endfor %}
+Earlier feedback:
+{% for feedback in feedback_history %}
+{{ loop.index }}. {{ feedback }}
+{% endfor %}

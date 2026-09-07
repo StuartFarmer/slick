@@ -1,0 +1,5 @@
+{% macro conversation(messages) %}
+{% for message in messages %}
+{{ message.role }}: {{ message.content }}
+{% endfor %}
+{% endmacro %}

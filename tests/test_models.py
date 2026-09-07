@@ -1,9 +1,13 @@
 """Model tests: the prompt-in/text-out contract every step is built on."""
 
+import asyncio
 import os
+import signal
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from slick import models as models_module
 from slick.models import (
@@ -43,6 +47,11 @@ class Call(unittest.TestCase):
         result = FakeModel().execute("analyze this")
         self.assertEqual(result.final_message, "report body")
         self.assertEqual(result.transcript, "report body")
+
+    def test_an_empty_workdir_is_normalized_to_the_current_directory(self):
+        model = FakeModel()
+        model.execute("prompt", workdir="")
+        self.assertEqual(model.runs[0][2], Path("."))
 
     def test_the_prompt_is_fed_to_the_process(self):
         model = FakeModel()
@@ -114,6 +123,147 @@ class CodexTranscript(unittest.TestCase):
 
     def test_a_transcript_with_no_agent_message_yields_empty(self):
         self.assertEqual(CodexModel()._parse_final("just noise"), "")
+
+
+class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_prompt_encoding_does_not_start_a_process(self):
+        create_process = asyncio.create_subprocess_exec
+        processes = []
+
+        async def record_process(*args, **kwargs):
+            process = await create_process(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        model = Subprocess.RealModel([sys.executable, "-c", "import sys; sys.stdin.read()"])
+        try:
+            with patch("slick.models.asyncio.create_subprocess_exec", side_effect=record_process):
+                with self.assertRaises(UnicodeEncodeError):
+                    await model.acall("\ud800")
+            self.assertEqual(processes, [])
+        finally:
+            for process in processes:
+                if process.returncode is None:
+                    process.kill()
+                await process.communicate()
+
+    async def test_stdout_is_captured_and_stdin_is_the_prompt(self):
+        model = Subprocess.RealModel(
+            [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"]
+        )
+        self.assertEqual(await model.acall("echoed café"), "echoed café")
+
+    async def test_execute_preserves_workdir_and_sandbox(self):
+        class AsyncFake(FakeModel):
+            async def _arun_process(self, command, prompt, *, workdir, label):
+                return self._run_process(command, prompt, workdir=workdir, label=label)
+
+        model = AsyncFake()
+        result = await model.aexecute("prompt", workdir="/tmp/work", sandbox="workspace-write")
+        self.assertEqual(result.final_message, "report body")
+        self.assertEqual(result.transcript, "report body")
+        self.assertEqual(
+            model.runs,
+            [(["fake-cli", "workspace-write"], "prompt", Path("/tmp/work"), "fake")],
+        )
+        await model.aexecute("prompt", workdir="")
+        self.assertEqual(model.runs[-1][2], Path("."))
+
+    async def test_a_nonzero_exit_raises_with_the_detail(self):
+        model = Subprocess.RealModel(
+            [sys.executable, "-c", "import sys; sys.stderr.write('boom'); sys.exit(3)"]
+        )
+        with self.assertRaisesRegex(ModelError, r"real failed \(exit 3\): boom"):
+            await model.acall("prompt")
+
+    async def test_timeout_kills_and_reaps_the_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "pid"
+            code = (
+                "import os, pathlib, sys, time; "
+                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
+            )
+            model = Subprocess.RealModel([sys.executable, "-c", code, str(pid_path)], timeout=1)
+            with self.assertRaisesRegex(ModelError, "real timed out after 1s"):
+                await model.acall("prompt")
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(pid_path.read_text()), 0)
+
+    async def test_cancellation_kills_and_reaps_the_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "pid"
+            code = (
+                "import os, pathlib, sys, time; "
+                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
+            )
+            model = Subprocess.RealModel([sys.executable, "-c", code, str(pid_path)])
+            task = asyncio.create_task(model.acall("prompt"))
+            try:
+
+                async def wait_started():
+                    while not pid_path.exists():
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(wait_started(), timeout=5)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int(pid_path.read_text()), 0)
+            finally:
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    async def test_codex_parses_the_final_message_and_keeps_the_transcript(self):
+        transcript = (
+            "\n".join(
+                [
+                    '{"type":"item.completed","item":{"type":"agent_message","text":"first"}}',
+                    '{"type":"item.completed","item":{"type":"agent_message","text":"final"}}',
+                ]
+            )
+            + "\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "fake_codex.py"
+            script.write_text(f"import sys\nsys.stdin.read()\nsys.stdout.write({transcript!r})\n")
+            result = await CodexModel(command=str(script)).aexecute("prompt")
+        self.assertEqual(result.final_message, "final")
+        self.assertEqual(result.transcript, transcript)
+
+    @unittest.skipUnless(os.name == "posix", "Process groups require POSIX")
+    async def test_cancellation_closes_pipes_inherited_by_a_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_path = Path(directory) / "pid"
+            code = (
+                "import os, pathlib, subprocess, sys; "
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+                "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))"
+            )
+            model = Subprocess.RealModel([sys.executable, "-c", code, str(pid_path)])
+            task = asyncio.create_task(model.acall("prompt"))
+            try:
+
+                async def wait_started():
+                    while not pid_path.exists():
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(wait_started(), timeout=5)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=2)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int(pid_path.read_text()), 0)
+            finally:
+                if pid_path.exists():
+                    try:
+                        os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
 
 
 class Commands(unittest.TestCase):

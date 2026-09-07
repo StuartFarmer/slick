@@ -1,0 +1,9 @@
+{% include "shared/style.j2" %}
+
+{% for document in documents %}
+<document>
+{{ document }}
+</document>
+{% endfor %}
+
+Question: {{ question }}

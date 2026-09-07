@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Rendering-only `Prompt("file.j2")` callable, independent of backends and state.
+- `QuestionAnswerer` example showing ordinary class methods and instance-owned
+  history with separate answer and critique templates.
+- Public `render(template, **variables)` and `parse(text, returns=str)` functions,
+  shared with the prompt decorator.
+- `@prompt(backend=...)` and native async decorated calls/rendering; modern calls
+  default to no logging, cache or automatic repair. Legacy sync defaults remain.
+- Optional OpenAI Responses and Anthropic Messages adapters with sync/async calls,
+  explicit limits/retries, lazy SDK loading and owned/injected client lifecycle.
+- Native async CLI `acall`/`aexecute` with timeout/cancellation process cleanup.
+- Offline examples for summaries, templated conversation history and retrieval.
+
+### Changed
+- Prompt validation errors expose the rejected text in `.response`.
+- API SDKs are optional extras; the core still depends only on Jinja2 and Pydantic.
+
 ## [0.2.0]
 
 Rewritten around one primitive: a prompt is a typed Python function whose

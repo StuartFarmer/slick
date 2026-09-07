@@ -17,9 +17,11 @@ DEFAULT_BACKEND.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 from abc import ABC, abstractmethod
@@ -61,6 +63,10 @@ class Model(ABC):
         """Single call with complete context, returning the response text."""
         return self.execute(prompt, sandbox="read-only").final_message
 
+    async def acall(self, prompt: str) -> str:
+        """Single native async call, returning the response text."""
+        return (await self.aexecute(prompt, sandbox="read-only")).final_message
+
     def execute(
         self,
         prompt: str,
@@ -69,12 +75,25 @@ class Model(ABC):
     ) -> ExecutionResult:
         """Low-level engine: run `prompt` through the CLI. Everything flows
         through stdout as strings."""
-        if workdir:
+        if workdir is not None:
             workdir = Path(workdir)
 
         command = self._command(workdir=workdir, sandbox=sandbox)
         transcript = self._run_process(command, prompt, workdir=workdir, label=self.backend)
 
+        return ExecutionResult(final_message=self._parse_final(transcript), transcript=transcript)
+
+    async def aexecute(
+        self,
+        prompt: str,
+        workdir: Path | str | None = None,
+        sandbox: str = "read-only",
+    ) -> ExecutionResult:
+        """Run the CLI asynchronously; cancellation kills and reaps its process."""
+        if workdir is not None:
+            workdir = Path(workdir)
+        command = self._command(workdir=workdir, sandbox=sandbox)
+        transcript = await self._arun_process(command, prompt, workdir=workdir, label=self.backend)
         return ExecutionResult(final_message=self._parse_final(transcript), transcript=transcript)
 
     @abstractmethod
@@ -110,6 +129,49 @@ class Model(ABC):
             detail = (result.stderr or result.stdout).strip()[-2000:]
             raise ModelError(f"{label} failed (exit {result.returncode}): {detail}")
         return result.stdout
+
+    async def _arun_process(
+        self,
+        command: list[str],
+        prompt: str,
+        *,
+        workdir: Path | None,
+        label: str,
+    ) -> str:
+        """Feed stdin and capture stdout without blocking the event loop."""
+        encoded_prompt = prompt.encode()
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=workdir,
+            start_new_session=os.name == "posix",
+        )
+        communication = asyncio.create_task(process.communicate(encoded_prompt))
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                asyncio.shield(communication), timeout=self.timeout
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+            try:
+                if os.name == "posix":
+                    # Include children that keep the CLI's output pipes open.
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            await communication
+            await process.wait()
+            if isinstance(exc, asyncio.TimeoutError):
+                raise ModelError(f"{label} timed out after {self.timeout}s.") from exc
+            raise
+
+        if process.returncode != 0:
+            detail = (stderr or stdout).decode().strip()[-2000:]
+            raise ModelError(f"{label} failed (exit {process.returncode}): {detail}")
+        return stdout.decode()
 
 
 class ClaudeModel(Model):

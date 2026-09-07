@@ -1,15 +1,9 @@
-"""Slick: prompts as typed Python functions, run on CLI-backed models.
+"""Slick: Jinja templates to LLMs and back.
 
-    from slick import prompt
-
-    @prompt(template="summarize.md.j2")
-    def summarize(document: str, audience: str = "an engineer") -> Summary:
-        '''Summarize a document for one audience.'''
-
-The template file supplies the words, the signature supplies the
-variables, and the return annotation supplies the output contract. The
-decorator lives in `slick.prompts`, the model primitives in
-`slick.models`. Both are re-exported here.
+Use Prompt or render with an ordinary backend.call/acall, then parse when
+needed. The existing @prompt decorator remains available as typed
+shorthand. Optional API adapters live in slick.backends. Legacy CLI model
+exports remain available here.
 """
 
 from __future__ import annotations
@@ -26,7 +20,7 @@ from .models import (
     get_model,
     set_default,
 )
-from .prompts import PromptError, prompt
+from .prompts import Prompt, PromptError, parse, prompt, render
 
 try:
     __version__ = version("slick-ai")
@@ -39,10 +33,13 @@ __all__ = [
     "ExecutionResult",
     "Model",
     "ModelError",
+    "Prompt",
     "PromptError",
     "__version__",
     "get_default",
     "get_model",
+    "parse",
     "prompt",
+    "render",
     "set_default",
 ]

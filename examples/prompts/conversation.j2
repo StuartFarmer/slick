@@ -1,0 +1,7 @@
+{% include "shared/style.j2" %}
+
+{% for message in messages %}
+{{ message.role }}: {{ message.content }}
+{% endfor %}
+
+user: {{ question }}

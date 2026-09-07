@@ -101,6 +101,60 @@ LLM calls. This example assumes sequential calls on each instance; a failed
 exchange is not appended, and critique does not modify history. The templates
 are ordinary files; see the [runnable example](examples/question_answerer.py).
 
+## Python functions as tools
+
+Prepare ordinary functions or bound methods using their annotations and docstrings:
+
+```python
+from slick.tools import prepare_tools
+
+class Documents:
+    def __init__(self, records):
+        self.records = records
+
+    def read(self, key: str) -> str:
+        """Retrieve a document by its key."""
+        return self.records[key]
+
+documents = Documents({"intro": "Slick renders Jinja templates."})
+tools = prepare_tools([documents.read])
+
+schema = tools["read"].parameters       # JSON Schema for {"key": ...}; no self
+text = tools["read"].invoke({"key": "intro"})
+text = await tools["read"].ainvoke({"key": "intro"})
+```
+
+Preparation validates the entire list without executing the functions. Names must
+be unique, and each tool needs a description and typed input parameters. Use
+`Tool(documents.read, name="read_document", description="...")` from `slick` for
+explicit overrides. Direct Python calls such as `documents.read("intro")` are
+unchanged. The selected bound methods retain their instance and its state.
+
+Tool arguments are JSON dictionaries. Slick rejects extra arguments and invalid
+types before execution, constructs declared nested Pydantic models, and preserves
+Python defaults when arguments are omitted. Nullable parameters without defaults
+are still required. Strings, integers, finite floats, booleans, null, typed lists,
+string-keyed dictionaries, literals, enums, Pydantic models, and TypedDicts are
+supported. `Annotated[T, Field(...)]` supplies descriptions and constraints.
+
+Declared return types are validated. Strings are returned unchanged; other
+supported results become JSON text. Without a return annotation, the result must
+already be text or JSON-compatible data. Arbitrary objects are never silently
+converted with `str()`. Binary/date/path types, tuples, sets, untyped inputs, and
+other deferred types are listed in the [tool contract](docs/superpowers/specs/2026-09-07-callable-tools.md).
+
+`ToolError` exposes `.name` and `.phase` (`definition`, `arguments`, `execution`,
+or `result`) and preserves the underlying exception as its cause. Functions are
+never retried automatically. A result error occurs after the function has run;
+it does not undo its effects. `ainvoke` awaits async functions and runs sync
+functions inline. Wrap blocking work explicitly with `asyncio.to_thread` when
+needed. Cancellation propagates normally.
+
+This is the local tool primitive. API backends still accept text only; native
+tool registration, provider schema adaptation, and the model/tool loop are a
+separate milestone. `parameters` provides a fresh local schema, which may require
+adaptation for a provider's supported schema subset.
+
 ## Existing executing decorator
 
 The lowercase `@prompt` decorator remains available with its existing behavior:
@@ -172,8 +226,8 @@ API adapters use [OpenAI Responses](https://developers.openai.com/api/docs/libra
 and [Anthropic Messages](https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python).
 Both expose `call(text)` and `acall(text)`. Refused, incomplete, or unexpected
 tool outputs raise `BackendError` (an alias of `ModelError`); native transport
-exceptions remain accessible through the chained cause. No tools are configured
-by these adapters.
+exceptions remain accessible through the chained cause. The text-only methods
+do not configure tools; use `aturn` for native tool requests.
 
 SDK transport retries default to zero; set `max_retries=` explicitly to enable
 them. Owned SDK clients are created and closed per call. For connection reuse,
@@ -190,6 +244,64 @@ Windows descendants require application-level management. The lower-level
 
 A custom backend only needs `call(text) -> str`, `acall(text) -> str`, or both.
 No inheritance, registration or metadata is required for ordinary calls.
+
+## Native tool turns
+
+API backends also expose `aturn(history, tools=..., instructions=...)`. It prepares
+callables and performs one request, returning text, tool calls, provider-native
+items and available usage. The application owns history and executes the functions:
+
+```python
+import asyncio
+from slick import ToolError
+from slick.backends import OpenAI
+from slick.tools import prepare_tools
+from slick.turns import ToolResult, UserMessage
+
+def lookup(name: str) -> str:
+    """Look up a local color description."""
+    return {"blue": "a cool primary color"}.get(name, "unknown")
+
+async def main():
+    backend = OpenAI(model="YOUR_MODEL_ID")
+    tools = prepare_tools([lookup])
+    history = [UserMessage("Look up blue and describe it.")]
+    for _ in range(5):
+        turn = await backend.aturn(history, tools=list(tools.values()))
+        history.append(turn)
+        if not turn.tool_calls:
+            print(turn.text)
+            return
+        for call in turn.tool_calls:
+            if call.argument_error or call.name not in tools:
+                result = ToolResult(call.id, call.argument_error or "Unknown tool", True)
+            else:
+                try:
+                    output = await tools[call.name].ainvoke(call.arguments)
+                except ToolError as error:
+                    result = ToolResult(call.id, str(error), True)
+                else:
+                    result = ToolResult(call.id, output)
+            history.append(result)
+    raise RuntimeError("Turn budget exhausted")
+
+asyncio.run(main())
+```
+
+Install the API extra and set credentials before running this live example.
+`Anthropic` supports the same interface. Plain functions and bound methods may
+also be passed directly in `tools=[...]`. Native records live in `slick.turns`.
+Preserve returned turns unchanged: their opaque provider payloads carry information
+needed by subsequent requests. Supply one result for every requested tool before
+the next turn. Foreign provider/model histories and broken result groups fail
+before network I/O. There is no automatic tool execution or retry loop.
+OpenAI tool definitions use `strict=False` to preserve Python optional/default
+arguments; Slick's local argument and return validation remains strict. These
+native methods support local function tools, not provider-hosted tools or media.
+
+The [coding harness example](examples/coding_harness/README.md) adds error recovery,
+cancellation, workspace tools, verification, sessions and a TUI as ordinary Python.
+Its offline demo runs with `python -m examples.coding_harness --headless --task 'Fix total'`.
 
 ## Explicit execution options and compatibility
 

@@ -8,14 +8,13 @@ import asyncio
 import json
 import math
 from dataclasses import dataclass, replace
-from typing import Annotated
 
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, constr
 
 from examples._cli import ScriptedBackend, backend_from_args, parser, positive_int
 from slick import Prompt, parse
 
-NonemptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+NonemptyText = constr(strip_whitespace=True, min_length=1)
 
 
 class Candidate(BaseModel):

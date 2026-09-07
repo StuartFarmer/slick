@@ -28,6 +28,22 @@ answers demonstrate the default tasks; changing the task does not make the demo
 responses intelligent. Use `--help` on each module to see its input and budget flags.
 The earlier functional example remains available as `python -m examples.core`.
 
+## Coding harness
+
+The [coding harness example](coding_harness/README.md) adds a native tool loop,
+workspace edits, real checks and bounded repair to an ordinary `CodingAgent` class.
+Run its offline scripted demo independently:
+
+```bash
+python -m examples.coding_harness --headless --task 'Fix the total calculation'
+python -m pip install -r examples/coding_harness/requirements.txt
+python -m examples.coding_harness
+```
+
+The second command installs the optional Textual interface. The harness has its own
+CLI options, sessions and explicit check configuration; it supports OpenAI Responses
+and Anthropic Messages for real calls. Its prompts remain under `examples/prompts/`.
+
 ## Use a real backend
 
 Every pattern command accepts `--backend`, `--model`, and `--timeout` (seconds per

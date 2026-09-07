@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Native async `OpenAI.aturn` and `Anthropic.aturn` with callable tool definitions,
+  structured history, correlated results and preserved provider payloads. Each
+  request returns one turn; applications own execution and history.
+- Independent coding harness example with a Textual TUI, headless offline demo,
+  workspace tools, bounded subprocesses, real verification/repair, Jinja skills,
+  context compaction and explicit JSON sessions. Textual stays example-only.
+- Offline native transport, workspace, repair, session and UI acceptance tests.
+- Callable tools via `slick.tools.prepare_tools`, with optional `Tool` overrides,
+  inferred schemas, bound methods, strict argument/return validation, sync/async
+  invocation, and phased `ToolError` diagnostics. No decorator or provider loop.
+- Automated callable-tool contract tests, including Python 3.10/Pydantic 2.0 checks.
 - Rendering-only `Prompt("file.j2")` callable, independent of backends and state.
 - `QuestionAnswerer` example showing ordinary class methods and instance-owned
   history with separate answer and critique templates.
@@ -18,6 +29,7 @@ All notable changes to this project will be documented in this file.
 - Offline examples for summaries, templated conversation history and retrieval.
 
 ### Changed
+- Two prompting examples use string constraints compatible with Pydantic 2.0.
 - Prompt validation errors expose the rejected text in `.response`.
 - API SDKs are optional extras; the core still depends only on Jinja2 and Pydantic.
 

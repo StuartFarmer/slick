@@ -12,7 +12,10 @@ from dataclasses import KW_ONLY, dataclass, field
 from importlib import import_module
 from typing import Any
 
+from . import _anthropic_turns, _openai_turns
 from .models import ModelError
+from .tools import prepare_tools
+from .turns import ModelTurn, ToolResult, UserMessage, validate_history
 
 BackendError = ModelError
 
@@ -133,6 +136,42 @@ class OpenAI:
         except Exception as exc:
             raise BackendError("OpenAI request failed.") from exc
 
+    def _turn_request(self, history, tools, instructions):
+        prepared = prepare_tools(tools)
+        validate_history(history, provider="openai", model=self.model)
+        request = self._request(_openai_turns.encode_history(history))
+        request.update(
+            tools=_openai_turns.tool_definitions(prepared), include=["reasoning.encrypted_content"]
+        )
+        if instructions:
+            request["instructions"] = instructions
+        if prepared:
+            request["parallel_tool_calls"] = False
+        return request
+
+    async def aturn(
+        self,
+        history: list[UserMessage | ModelTurn | ToolResult],
+        *,
+        tools: list,
+        instructions: str = "",
+    ) -> ModelTurn:
+        """Make one native request; never execute tools or mutate history."""
+        try:
+            request = self._turn_request(history, tools, instructions)
+            async with _client(
+                "openai", "AsyncOpenAI", self.async_client, self.timeout, self.max_retries
+            ) as client:
+                response = await client.responses.create(**request)
+            turn = _openai_turns.decode_turn(response.model_dump(mode="json"), model=self.model)
+            if turn.tool_calls and not request["tools"]:
+                raise ValueError("OpenAI returned tool calls with no tools available")
+            return turn
+        except BackendError:
+            raise
+        except Exception as exc:
+            raise BackendError(f"OpenAI native turn failed: {exc}") from exc
+
 
 @dataclass
 class Anthropic:
@@ -187,3 +226,41 @@ class Anthropic:
             raise
         except Exception as exc:
             raise BackendError("Anthropic request failed.") from exc
+
+    def _turn_request(self, history, tools, instructions):
+        prepared = prepare_tools(tools)
+        validate_history(history, provider="anthropic", model=self.model)
+        request = {
+            "model": self.model,
+            "messages": _anthropic_turns.encode_history(history),
+            "max_tokens": self.max_output_tokens,
+            "tools": _anthropic_turns.tool_definitions(prepared),
+        }
+        if instructions:
+            request["system"] = instructions
+        if prepared:
+            request["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+        return request
+
+    async def aturn(
+        self,
+        history: list[UserMessage | ModelTurn | ToolResult],
+        *,
+        tools: list,
+        instructions: str = "",
+    ) -> ModelTurn:
+        """Make one native request; never execute tools or mutate history."""
+        try:
+            request = self._turn_request(history, tools, instructions)
+            async with _client(
+                "anthropic", "AsyncAnthropic", self.async_client, self.timeout, self.max_retries
+            ) as client:
+                response = await client.messages.create(**request)
+            turn = _anthropic_turns.decode_turn(response.model_dump(mode="json"), model=self.model)
+            if turn.tool_calls and not request["tools"]:
+                raise ValueError("Anthropic returned tool calls with no tools available")
+            return turn
+        except BackendError:
+            raise
+        except Exception as exc:
+            raise BackendError(f"Anthropic native turn failed: {exc}") from exc

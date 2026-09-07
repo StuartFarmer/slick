@@ -21,6 +21,7 @@ from .models import (
     set_default,
 )
 from .prompts import Prompt, PromptError, parse, prompt, render
+from .tools import Tool, ToolError
 
 try:
     __version__ = version("slick-ai")
@@ -35,6 +36,8 @@ __all__ = [
     "ModelError",
     "Prompt",
     "PromptError",
+    "Tool",
+    "ToolError",
     "__version__",
     "get_default",
     "get_model",

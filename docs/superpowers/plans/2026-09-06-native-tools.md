@@ -2,6 +2,8 @@
 
 > Superseded for current implementation by the [functional core](../specs/2026-09-07-functional-core.md). This document records earlier exploration; Agent, native tools and richer request protocols are deferred.
 
+> For the subsequent callable-tool primitive, use the [September 7 callable-tools contract](../specs/2026-09-07-callable-tools.md) and its executable acceptance suite. This historical plan does not define that milestone's interfaces or execution behavior.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** pass ordinary Python functions to a Slick Agent backed by OpenAI or Anthropic, including functions that themselves call models, agents or harnesses.

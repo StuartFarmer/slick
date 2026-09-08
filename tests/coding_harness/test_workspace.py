@@ -222,6 +222,37 @@ def test_unborn_repo_and_subdirectory_selection(tmp_path):
     subdir.mkdir()
     with pytest.raises(ValueError, match="root"):
         asyncio.run(Workspace(subdir, checks=[], decide=deny).initialize())
+    with pytest.raises(ValueError, match="root"):
+        asyncio.run(Workspace(subdir, checks=[], decide=deny).initialize(create=True))
+    assert not (subdir / ".git").exists()
+
+
+@pytest.mark.parametrize("kind", ["bare", "broken"])
+def test_new_workspace_does_not_reinitialize_existing_git_metadata(tmp_path, kind):
+    if kind == "bare":
+        subprocess.run(["git", "init", "--bare", "-q", str(tmp_path)], check=True)
+        marker = tmp_path / "HEAD"
+    else:
+        marker = tmp_path / ".git"
+        marker.write_text("gitdir: /missing/worktree/metadata\n")
+    before = marker.read_bytes()
+
+    async def deny(request):
+        return "deny"
+
+    with pytest.raises((ValueError, RuntimeError)):
+        asyncio.run(Workspace(tmp_path, checks=[], decide=deny).initialize(create=True))
+    assert marker.read_bytes() == before
+    assert not (tmp_path / ".git").is_dir()
+
+
+def test_workspace_reinitialization_requires_existing_repository(tmp_path):
+    async def deny(request):
+        return "deny"
+
+    with pytest.raises(RuntimeError, match="Git inspection failed"):
+        asyncio.run(Workspace(tmp_path, checks=[], decide=deny).initialize())
+    assert not (tmp_path / ".git").exists()
 
 
 def test_session_approval_is_not_shared_between_workspaces(workspace, tmp_path):

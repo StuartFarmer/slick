@@ -65,7 +65,7 @@ class SavedEdit(Record):
 
 class SavedSession(Record):
     version: int = Field(strict=True, ge=1, le=1)
-    provider: Literal["openai", "anthropic", "demo"]
+    provider: Literal["openai", "anthropic", "litellm", "demo"]
     model: str
     root: str
     head: str | None

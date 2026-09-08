@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- `OpenRouterAPI` for direct sync/async text calls with OpenRouter credentials,
+  using the optional OpenAI SDK, plus `slick call --provider openrouter`.
+- Consolidated native turn records, provider codecs, and callable-tool support
+  under `slick.turns`; old `slick.tools` and private codec imports remain as
+  compatibility shims.
+- Added one shared Chat Completions turn codec for LiteLLM and OpenRouter;
+  the coding harness no longer contains a provider-specific turn adapter.
 - Native async `OpenAIAPI.aturn` and `AnthropicAPI.aturn` with callable tool definitions,
   structured history, correlated results and preserved provider payloads. Each
   request returns one turn; applications own execution and history.
@@ -30,7 +37,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Provider implementations now live in `slick.providers`, with descriptive
-  `CodexCLI`, `ClaudeCLI`, `OpenAIAPI`, `AnthropicAPI`, and `LiteLLMGateway` classes.
+  `CodexCLI`, `ClaudeCLI`, `OpenAIAPI`, `AnthropicAPI`, and `LiteLLMAPI` classes.
 - Provider selection uses `@prompt(provider=...)`, `--provider`, `SLICK_PROVIDER`,
   and `slick provider`. The CLI-only factory is `get_command`.
 - Removed short class aliases and obsolete compatibility modules; callers must

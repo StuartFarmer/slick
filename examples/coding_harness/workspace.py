@@ -53,12 +53,21 @@ class Workspace:
         self.initial_digests = {}
         self.edit_ledger = []
 
-    async def initialize(self) -> None:
-        if not self.root.is_dir():
-            raise ValueError("Workspace root must be an existing directory")
+    async def initialize(self, *, create: bool = False) -> None:
         for executable in ("git", "rg"):
             if shutil.which(executable) is None:
                 raise RuntimeError(f"{executable} is required")
+        if create:
+            self.root.mkdir(parents=True, exist_ok=True)
+        if not self.root.is_dir():
+            raise ValueError("Workspace root must be an existing directory")
+        markers = [path / ".git" for path in (self.root, *self.root.parents)]
+        if create and not any(path.exists() or path.is_symlink() for path in markers):
+            git_dir = await self._git(["rev-parse", "--git-dir"], allow_failure=True)
+            if git_dir.timed_out:
+                raise RuntimeError("Git inspection timed out")
+            if git_dir.exit_code != 0:
+                await self._git(["init", "--quiet", "--template="])
         root = await self._git(["rev-parse", "--show-toplevel"])
         if Path(root.stdout.strip()).resolve() != self.root:
             raise ValueError("Select the Git worktree root, not a subdirectory")

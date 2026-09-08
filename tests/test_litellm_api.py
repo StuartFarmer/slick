@@ -12,6 +12,76 @@ from slick.providers import ProviderError
 supported_python = pytest.mark.skipif(sys.version_info >= (3, 15), reason="LiteLLM Python range")
 
 
+def test_litellm_native_turn_uses_slick_chat_completions_protocol(monkeypatch):
+    from slick.providers import LiteLLMAPI
+    from slick.turns import ModelTurn, ToolResult, UserMessage
+
+    requests = []
+    native_response = {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "I will search.",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {
+                                "name": "search",
+                                "arguments": '{"query":"pricing"}',
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 3},
+    }
+
+    async def acompletion(**request):
+        requests.append(request)
+        return NS(model_dump=lambda **kwargs: native_response)
+
+    monkeypatch.setitem(sys.modules, "litellm", NS(acompletion=acompletion))
+
+    def search(query: str) -> str:
+        """Search documents."""
+        return query
+
+    provider = LiteLLMAPI("openai/test")
+    history = [UserMessage("Find pricing")]
+    response = asyncio.run(provider.aturn(history, tools=[search], instructions="Be concise."))
+
+    assert isinstance(response, ModelTurn)
+    assert response.provider == "litellm"
+    assert response.tool_calls[0].name == "search"
+    assert response.input_tokens == 12
+    assert requests[0]["messages"] == [
+        {"role": "system", "content": "Be concise."},
+        {"role": "user", "content": "Find pricing"},
+    ]
+    assert requests[0]["tools"][0]["function"]["name"] == "search"
+    assistant_message = native_response["choices"][0]["message"].copy()
+    assistant_message["tool_calls"] = [dict(assistant_message["tool_calls"][0])]
+
+    followup = [*history, response, ToolResult("call-1", "Found pricing.md")]
+    native_response["choices"][0]["finish_reason"] = "stop"
+    native_response["choices"][0]["message"] = {
+        "role": "assistant",
+        "content": "Found it.",
+        "tool_calls": None,
+    }
+    asyncio.run(provider.aturn(followup, tools=[search]))
+    assert requests[1]["messages"][-2] == assistant_message
+    assert requests[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": "Found pricing.md",
+    }
+
+
 def response(content="  answer\n", finish="stop", **message_fields):
     message = {"content": content, "tool_calls": None, "function_call": None, "refusal": None}
     message.update(message_fields)
@@ -41,12 +111,12 @@ def install_sdk(monkeypatch, reply, requests):
 @supported_python
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_exact_text_options_and_configuration_are_preserved(monkeypatch, asynchronous):
-    from slick.providers import LiteLLMGateway
+    from slick.providers import LiteLLMAPI
 
     requests = []
     install_sdk(monkeypatch, response(), requests)
     options = {"temperature": 0.2, "response_format": {"type": "json_object"}}
-    provider = LiteLLMGateway(
+    provider = LiteLLMAPI(
         "openai/private-model",
         api_base="http://localhost:8000/v1",
         api_key="offline",
@@ -75,11 +145,11 @@ def test_exact_text_options_and_configuration_are_preserved(monkeypatch, asynchr
 
 @supported_python
 def test_provider_resolves_missing_credentials_and_unknown_model(monkeypatch):
-    from slick.providers import LiteLLMGateway
+    from slick.providers import LiteLLMAPI
 
     requests = []
     install_sdk(monkeypatch, response(""), requests)
-    assert LiteLLMGateway("unusual/model", max_retries=2).call("prompt") == ""
+    assert LiteLLMAPI("unusual/model", max_retries=2).call("prompt") == ""
     assert requests[0]["model"] == "unusual/model"
     assert requests[0]["num_retries"] == 2
     assert "api_base" not in requests[0] and "api_key" not in requests[0]
@@ -88,7 +158,7 @@ def test_provider_resolves_missing_credentials_and_unknown_model(monkeypatch):
 
 @supported_python
 def test_sdk_mutation_does_not_change_the_next_request(monkeypatch):
-    from slick.providers import LiteLLMGateway
+    from slick.providers import LiteLLMAPI
 
     seen = []
 
@@ -98,7 +168,7 @@ def test_sdk_mutation_does_not_change_the_next_request(monkeypatch):
         return response()
 
     monkeypatch.setitem(sys.modules, "litellm", NS(completion=completion))
-    provider = LiteLLMGateway("openai/test", options={"response_format": {"type": "json_object"}})
+    provider = LiteLLMAPI("openai/test", options={"response_format": {"type": "json_object"}})
     provider.call("one")
     provider.call("two")
     assert seen == ["json_object", "json_object"]
@@ -123,10 +193,10 @@ def test_sdk_mutation_does_not_change_the_next_request(monkeypatch):
     ],
 )
 def test_only_final_text_is_accepted(monkeypatch, asynchronous, reply):
-    from slick.providers import LiteLLMGateway
+    from slick.providers import LiteLLMAPI
 
     install_sdk(monkeypatch, reply, [])
-    provider = LiteLLMGateway("openai/test")
+    provider = LiteLLMAPI("openai/test")
     with pytest.raises(ProviderError):
         asyncio.run(provider.acall("prompt")) if asynchronous else provider.call("prompt")
 
@@ -134,11 +204,11 @@ def test_only_final_text_is_accepted(monkeypatch, asynchronous, reply):
 @supported_python
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_provider_exception_is_chained_without_exposing_its_message(monkeypatch, asynchronous):
-    from slick.providers import LiteLLMGateway
+    from slick.providers import LiteLLMAPI
 
     error = RuntimeError("sensitive-provider-detail")
     install_sdk(monkeypatch, error, [])
-    provider = LiteLLMGateway("openai/test")
+    provider = LiteLLMAPI("openai/test")
     with pytest.raises(ProviderError) as caught:
         asyncio.run(provider.acall("prompt")) if asynchronous else provider.call("prompt")
     assert caught.value.__cause__ is error
@@ -166,10 +236,10 @@ def test_provider_exception_is_chained_without_exposing_its_message(monkeypatch,
     ],
 )
 def test_invalid_configuration_is_rejected(kwargs):
-    from slick.providers import LiteLLMGateway
+    from slick.providers import LiteLLMAPI
 
     with pytest.raises(ValueError):
-        LiteLLMGateway(**{"model": "openai/test", **kwargs})
+        LiteLLMAPI(**{"model": "openai/test", **kwargs})
 
 
 @pytest.mark.parametrize(
@@ -204,31 +274,30 @@ def test_invalid_configuration_is_rejected(kwargs):
     ],
 )
 def test_options_cannot_override_execution_contract(key):
-    from slick.providers import LiteLLMGateway
+    from slick.providers import LiteLLMAPI
 
     with pytest.raises(ValueError):
-        LiteLLMGateway("openai/test", options={key: "private-value"})
+        LiteLLMAPI("openai/test", options={key: "private-value"})
 
 
 @pytest.mark.parametrize("limit", ["max_tokens", "max_output_tokens", "max_completion_tokens"])
 def test_chatgpt_rejects_limits_that_upstream_discards(limit):
-    from slick.providers import LiteLLMGateway
+    from slick.providers import LiteLLMAPI
 
     with pytest.raises(ValueError, match="chatgpt"):
-        LiteLLMGateway("chatgpt/example", options={limit: 20})
+        LiteLLMAPI("chatgpt/example", options={limit: 20})
 
 
 def test_representation_and_persistence_do_not_expose_credentials():
-    from slick import PromptError
-    from slick.prompts import _digest
-    from slick.providers import LiteLLMGateway
+    from slick.providers import LiteLLMAPI
 
-    provider = LiteLLMGateway(
+    provider = LiteLLMAPI(
         "openai/test", api_key="private-key", options={"secret": "private-option"}
     )
     assert "private-key" not in repr(provider) and "private-option" not in repr(provider)
-    with pytest.raises(PromptError, match="identity"):
-        _digest("prompt", provider)
+    identity = provider.identity()
+    assert "private-key" not in str(identity)
+    assert "private-option" not in str(identity)
 
 
 @supported_python
@@ -243,7 +312,7 @@ def test_missing_sdk_and_broken_dependency_have_distinct_errors(monkeypatch):
 
         monkeypatch.setattr(adapter, "import_module", fail_import)
         with pytest.raises(ProviderError, match=message) as caught:
-            adapter.LiteLLMGateway("openai/test").call("prompt")
+            adapter.LiteLLMAPI("openai/test").call("prompt")
         assert caught.value.__cause__ is error
 
 
@@ -252,12 +321,12 @@ def test_unsupported_python_fails_before_loading_sdk(monkeypatch):
 
     monkeypatch.setattr(adapter, "sys", NS(version_info=(3, 15)))
     with pytest.raises(ProviderError, match=r"3\.10.*3\.15"):
-        adapter.LiteLLMGateway("openai/test").call("prompt")
+        adapter.LiteLLMAPI("openai/test").call("prompt")
 
 
 @supported_python
 def test_async_cancellation_propagates_without_sync_fallback(monkeypatch):
-    from slick.providers import LiteLLMGateway
+    from slick.providers import LiteLLMAPI
 
     async def run():
         started, cancelled = asyncio.Event(), asyncio.Event()
@@ -280,7 +349,7 @@ def test_async_cancellation_propagates_without_sync_fallback(monkeypatch):
                 acompletion=acompletion,
             ),
         )
-        task = asyncio.create_task(LiteLLMGateway("openai/test").acall("prompt"))
+        task = asyncio.create_task(LiteLLMAPI("openai/test").acall("prompt"))
         try:
             await asyncio.wait_for(started.wait(), 2)
             task.cancel()

@@ -12,11 +12,102 @@ from slick.providers import AnthropicAPI, OpenAIAPI
 httpx = pytest.importorskip("httpx")
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("outcome", ["stop", "length", "rate_limit"])
+def test_openrouter_sdk_uses_fixed_endpoint_and_explicit_credentials(
+    monkeypatch, asynchronous, outcome
+):
+    from slick.providers import OpenRouterAPI, ProviderError
+
+    sdk = pytest.importorskip("openai")
+    requests = []
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("unexpected external network access")
+
+    monkeypatch.setattr(socket.socket, "connect", no_network)
+    monkeypatch.setattr(socket, "getaddrinfo", no_network)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "environment-key")
+
+    def respond(request):
+        requests.append(request)
+        if outcome == "rate_limit":
+            return httpx.Response(
+                429, json={"error": {"message": "offline"}}, headers={"retry-after": "0"}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "offline",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "vendor/model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": outcome,
+                        "message": {
+                            "role": "assistant",
+                            "content": "  answer\n",
+                        },
+                    }
+                ],
+            },
+        )
+
+    options = {"model": "vendor/model", "api_key": "explicit-router-key", "timeout": 12.5}
+    transport = httpx.MockTransport(respond)
+    if asynchronous:
+
+        async def run():
+            async with httpx.AsyncClient(transport=transport) as http_client:
+                async with sdk.AsyncOpenAI(
+                    api_key="wrong-client-key",
+                    base_url="http://wrong.test/v1",
+                    http_client=http_client,
+                ) as client:
+                    provider = OpenRouterAPI(**options, async_client=client)
+                    if outcome == "stop":
+                        assert await provider.acall("prompt\n") == "  answer\n"
+                    else:
+                        with pytest.raises(ProviderError):
+                            await provider.acall("prompt\n")
+                    assert not http_client.is_closed
+
+        asyncio.run(run())
+    else:
+        with httpx.Client(transport=transport) as http_client:
+            with sdk.OpenAI(
+                api_key="wrong-client-key",
+                base_url="http://wrong.test/v1",
+                http_client=http_client,
+            ) as client:
+                provider = OpenRouterAPI(**options, client=client)
+                if outcome == "stop":
+                    assert provider.call("prompt\n") == "  answer\n"
+                else:
+                    with pytest.raises(ProviderError):
+                        provider.call("prompt\n")
+                assert not http_client.is_closed
+    assert len(requests) == 1
+    request = requests[0]
+    assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
+    assert request.headers["authorization"] == "Bearer explicit-router-key"
+    assert request.extensions["timeout"]["read"] == 12.5
+    assert json.loads(request.content) == {
+        "model": "vendor/model",
+        "messages": [{"role": "user", "content": "prompt\n"}],
+        "max_tokens": 2048,
+        "stream": False,
+        "n": 1,
+    }
+
+
 @pytest.mark.skipif(sys.version_info >= (3, 15), reason="LiteLLM Python range")
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.parametrize("finish_reason", ["stop", "length", "rate_limit"])
 def test_litellm_real_sdk_uses_offline_transport(monkeypatch, asynchronous, finish_reason):
-    from slick.providers import LiteLLMGateway, ProviderError
+    from slick.providers import LiteLLMAPI, ProviderError
 
     blocked = []
 
@@ -60,7 +151,7 @@ def test_litellm_real_sdk_uses_offline_transport(monkeypatch, asynchronous, fini
             )
         return httpx.Response(200, json=reply)
 
-    provider_instance = LiteLLMGateway(
+    provider_instance = LiteLLMAPI(
         "openai/private-model",
         api_base="http://offline.test/v1",
         api_key="offline",

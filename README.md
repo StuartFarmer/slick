@@ -20,13 +20,13 @@ concurrency. Jinja handles context composition; `parse` validates results when n
 
 ```bash
 pip install slick-ai                  # base package with CLI providers
-pip install 'slick-ai[openai]'         # optional OpenAI SDK
+pip install 'slick-ai[openai]'         # SDK used by OpenAIAPI and OpenRouterAPI
 pip install 'slick-ai[anthropic]'      # optional Anthropic SDK
 pip install 'slick-ai[api]'            # both API SDKs
 pip install 'slick-ai[litellm]'        # optional multi-provider SDK (no proxy server)
 ```
 
-Native API providers use `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` when called. Model IDs
+API providers use `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY` when called. Model IDs
 are explicit application choices. Importing Slick or constructing an API provider
 does not load its SDK, require credentials, or make a request.
 
@@ -222,8 +222,8 @@ All implementations live in `slick.providers`:
 | Provider kind | Examples |
 | --- | --- |
 | CLI tools | `CodexCLI`, `ClaudeCLI`, and custom `Command` subclasses |
-| Remote inference | `OpenAIAPI`, `AnthropicAPI`, or `LiteLLMGateway` connected to a hosted endpoint |
-| Local inference | `LiteLLMGateway` connected to Ollama, LM Studio, vLLM, or another local server |
+| Remote inference | `OpenAIAPI`, `AnthropicAPI`, `OpenRouterAPI`, or `LiteLLMAPI` connected to a hosted endpoint |
+| Local inference | `LiteLLMAPI` connected to Ollama, LM Studio, vLLM, or another local server |
 
 LiteLLM can connect to local or remote endpoints using the same adapter. These
 categories describe configuration, not separate inheritance trees. OpenCode and
@@ -277,21 +277,56 @@ then the built-in default. Construct API providers explicitly with a model ID.
 A custom provider only needs `call(text) -> str`, `acall(text) -> str`, or both.
 No inheritance, registration or metadata is required for ordinary calls.
 
-### LiteLLM providers and local endpoints
+### OpenRouter API
 
 ```python
-from slick.providers import Provider, LiteLLMGateway
+from slick.providers import OpenRouterAPI
 
-local: Provider = LiteLLMGateway(
+router = OpenRouterAPI("PROVIDER/MODEL")
+answer = await router.acall("Explain Python generators.")
+```
+
+Install `slick-ai[openai]` and set `OPENROUTER_API_KEY`, or supply `api_key=`.
+Replace `PROVIDER/MODEL` with an OpenRouter catalog ID, without LiteLLM's
+additional `openrouter/` prefix. Calls go directly to
+`https://openrouter.ai/api/v1/chat/completions` using the optional OpenAI SDK,
+as described in [OpenRouter's quickstart](https://openrouter.ai/docs/quickstart).
+No LiteLLM installation or local gateway process is required.
+
+`call` and `acall` preserve final text and reject incomplete, refused, or tool-call
+responses. `aturn` uses the shared Slick Chat Completions codec for native tool
+requests. Defaults are `timeout=60`, `max_output_tokens=2048`, and `max_retries=0`.
+The retry setting controls SDK transport retries; OpenRouter's own upstream routing
+is managed by its service.
+
+For connection reuse, supply an OpenAI SDK `client=` or `async_client=`. Slick
+always sets the OpenRouter endpoint. An explicit key takes precedence over
+`OPENROUTER_API_KEY`. One of those keys is required even with an injected client;
+Slick never carries its existing credentials over to OpenRouter.
+The application owns injected clients; Slick closes clients it creates itself.
+
+```bash
+slick call "Explain generators" --provider openrouter --model PROVIDER/MODEL
+```
+
+### LiteLLM providers and local endpoints
+
+`LiteLLMAPI` wraps the SDK inside Slick's process and calls provider APIs.
+It does not run or require a separate gateway server.
+
+```python
+from slick.providers import Provider, LiteLLMAPI
+
+local: Provider = LiteLLMAPI(
     "ollama_chat/qwen3:8b",
     api_base="http://localhost:11434",
 )
-private = LiteLLMGateway(
+private = LiteLLMAPI(
     "openai/private-model",
     api_base="http://localhost:8000/v1",
     api_key="local",
 )
-router = LiteLLMGateway("openrouter/PROVIDER/MODEL")
+router = LiteLLMAPI("openrouter/PROVIDER/MODEL")
 
 answer = await local.acall("Explain Python generators.")
 ```
@@ -313,8 +348,9 @@ model and provider capabilities determine whether they are supported.
 Calls use the SDK's `completion`/`acompletion` functions without requiring a proxy.
 They reject truncated, refused, malformed, or tool-call responses with
 `ProviderError`, retaining provider exceptions as chained causes. Successful text
-is returned unchanged, including whitespace. The adapter does not configure
-tools, streaming, or fallback routing; those controls cannot be set in `options`.
+is returned unchanged, including whitespace. Native `aturn` calls use the same
+shared Chat Completions tool/history conversion as OpenRouter; text calls remain
+tool-free. Streaming and fallback routing cannot be set in `options`.
 Slick requests `drop_params=False`, but individual LiteLLM provider adapters can
 still translate or filter parameters.
 
@@ -330,10 +366,10 @@ provider-specific. The evaluated ChatGPT adapter injects default instructions an
 discards output token limits, so Slick rejects those explicit limit options for
 `chatgpt/`. Use `CodexCLI` or `ClaudeCLI` when you want execution through that installed CLI.
 
-`LiteLLMGateway` currently supports text calls only. It has no `aturn` or automatic
-persistence identity. Use modern `@prompt(provider=...)` defaults; opting into
-decorator logging/caching requires an application-defined provider identity.
-This avoids deriving cache keys from arbitrary credential-bearing options.
+`LiteLLMAPI` also exposes `aturn(history, tools=..., instructions=...)` using the
+shared Chat Completions codec. Its identity excludes credentials and arbitrary
+options, so it can be used in explicit session/provider metadata without leaking
+secrets.
 
 ## Native tool turns
 
@@ -392,7 +428,8 @@ native methods support local function tools, not provider-hosted tools or media.
 
 The [coding harness example](examples/coding_harness/README.md) adds error recovery,
 cancellation, workspace tools, verification, sessions and a TUI as ordinary Python.
-Its offline demo runs with `python -m examples.coding_harness --headless --task 'Fix total'`.
+It defaults to OpenAI with an explicit `--model` and `--workspace`.
+Its offline demo runs with `python -m examples.coding_harness --dry-run --headless --task 'Fix total'`.
 
 ## Explicit execution options and compatibility
 
@@ -468,7 +505,7 @@ poetry run pytest
 poetry run ruff check slick tests examples
 ```
 
-Explicit `litellm`, `openai`, and `anthropic` CLI choices require `--model` and use
+Explicit `litellm`, `openai`, `anthropic`, and `openrouter` CLI choices require `--model` and use
 provider environment credentials. `--api-base` is available only with `litellm`.
 Omitting `--provider` and the `slick provider` command show the configured CLI defaults;
 `get_command` remains the Codex/Claude resolver.

@@ -32,17 +32,25 @@ The earlier functional example remains available as `python -m examples.core`.
 
 The [coding harness example](coding_harness/README.md) adds a native tool loop,
 workspace edits, real checks and bounded repair to an ordinary `CodingAgent` class.
-Run its offline scripted demo independently:
+It defaults to OpenAI: set `OPENAI_API_KEY` and supply a model and Git workspace.
 
 ```bash
-python -m examples.coding_harness --headless --task 'Fix the total calculation'
+python -m pip install -e '.[api]'
 python -m pip install -r examples/coding_harness/requirements.txt
-python -m examples.coding_harness
+python -m examples.coding_harness --model YOUR_MODEL_ID --workspace /absolute/repo
 ```
 
-The second command installs the optional Textual interface. The harness has its own
+Use `--dry-run` for the offline scripted demo:
+
+```bash
+python -m examples.coding_harness --dry-run
+python -m examples.coding_harness --dry-run --headless --task 'Fix the total calculation'
+```
+
+Textual is optional for headless runs. The harness has its own
 CLI options, sessions and explicit check configuration; it supports OpenAI Responses
-and Anthropic Messages for real calls. Its prompts remain under `examples/prompts/`.
+and Anthropic Messages, plus LiteLLM tool calls (including OpenRouter).
+See its README for the OpenRouter setup. Its prompts remain under `examples/prompts/`.
 
 ## Use a real provider
 

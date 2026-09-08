@@ -4,7 +4,7 @@ Importing or constructing a provider does not import optional SDKs or execute
 requests. A model ID selects a model within the configured provider.
 """
 
-from ._api import AnthropicAPI, OpenAIAPI
+from ._api import AnthropicAPI, OpenAIAPI, OpenRouterAPI
 from ._base import Provider, ProviderError
 from ._command import (
     ClaudeCLI,
@@ -15,7 +15,7 @@ from ._command import (
     get_default,
     set_default,
 )
-from ._litellm import LiteLLMGateway
+from ._litellm import LiteLLMAPI
 
 __all__ = [
     "AnthropicAPI",
@@ -23,8 +23,9 @@ __all__ = [
     "CodexCLI",
     "Command",
     "ExecutionResult",
-    "LiteLLMGateway",
+    "LiteLLMAPI",
     "OpenAIAPI",
+    "OpenRouterAPI",
     "Provider",
     "ProviderError",
     "get_command",

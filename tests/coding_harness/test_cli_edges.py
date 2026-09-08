@@ -64,7 +64,7 @@ def test_unsupported_platform_fails_before_demo_creation(monkeypatch, capsys, os
 
     monkeypatch.setattr(cli, "create_demo", forbidden_demo)
     with pytest.raises(SystemExit) as stopped:
-        cli.main(["--headless", "--task", "Fix total"])
+        cli.main(["--dry-run", "--headless", "--task", "Fix total"])
     assert stopped.value.code == 2
     assert "macOS or Linux" in capsys.readouterr().err
 
@@ -72,7 +72,8 @@ def test_unsupported_platform_fails_before_demo_creation(monkeypatch, capsys, os
 @pytest.mark.parametrize(
     "override",
     [
-        ["--provider", "demo"],
+        ["--provider", "openai"],
+        ["--dry-run"],
         ["--model", "test"],
         ["--workspace", "/unused"],
         ["--config", "/unused.json"],
@@ -95,7 +96,7 @@ def blocked(name, *args, **kwargs):
         raise ModuleNotFoundError("No module named 'textual'")
     return original(name, *args, **kwargs)
 builtins.__import__ = blocked
-raise SystemExit(main([]))
+raise SystemExit(main(['--dry-run']))
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -146,7 +147,33 @@ def test_demo_root_is_removed_when_execution_fails(monkeypatch, capsys, failure)
 
     monkeypatch.setattr(cli, "_headless", fail_after_real_setup)
     expected = 130 if isinstance(failure, asyncio.CancelledError) else 1
-    assert cli.main(["--headless", "--task", "Fail after setup"]) == expected
+    assert cli.main(["--dry-run", "--headless", "--task", "Fail after setup"]) == expected
     assert len(roots) == 1 and not roots[0].exists()
     if expected == 1:
         assert "scripted failure" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        ["--provider", "openai"],
+        ["--model", "test"],
+        ["--workspace", "/unused"],
+        ["--config", "/unused.json"],
+    ],
+)
+def test_dry_run_rejects_live_options(capsys, override):
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--dry-run", *override])
+    assert stopped.value.code == 2
+    assert "unrecognized arguments" not in capsys.readouterr().err
+
+
+def test_default_provider_uses_openai_for_live_workspace(repo, monkeypatch, capsys):
+    def unavailable_provider(*, model):
+        assert model == "offline-test"
+        raise RuntimeError("OpenAI unavailable in offline test")
+
+    monkeypatch.setattr(cli, "OpenAIAPI", unavailable_provider)
+    assert cli.main(real_provider_args(repo)[2:]) == 1
+    assert "OpenAI unavailable in offline test" in capsys.readouterr().err

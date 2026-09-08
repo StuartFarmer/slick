@@ -13,7 +13,14 @@ def test_provider_names_and_ownership():
     assert slick.ProviderError is providers.ProviderError
     assert inspect.isabstract(providers.Provider)
     assert inspect.isabstract(providers.Command)
-    for name in ("CodexCLI", "ClaudeCLI", "OpenAIAPI", "AnthropicAPI", "LiteLLMGateway"):
+    for name in (
+        "CodexCLI",
+        "ClaudeCLI",
+        "OpenAIAPI",
+        "AnthropicAPI",
+        "LiteLLMAPI",
+        "OpenRouterAPI",
+    ):
         cls = getattr(providers, name)
         assert cls.__name__ == name
         assert cls.__module__.startswith("slick.providers.")
@@ -52,10 +59,11 @@ def forbid(event, args):
 sys.addaudithook(forbid)
 import slick
 from slick.providers import (
-    Provider, Command, CodexCLI, ClaudeCLI, OpenAIAPI, AnthropicAPI, LiteLLMGateway,
+    Provider, Command, CodexCLI, ClaudeCLI, OpenAIAPI, AnthropicAPI, LiteLLMAPI, OpenRouterAPI,
 )
 for provider in (
-    CodexCLI(), ClaudeCLI(), OpenAIAPI('test'), AnthropicAPI('test'), LiteLLMGateway('test'),
+    CodexCLI(), ClaudeCLI(), OpenAIAPI('test'), AnthropicAPI('test'), LiteLLMAPI('test'),
+    OpenRouterAPI('vendor/model'),
 ):
     assert isinstance(provider, Provider)
 assert not {'openai', 'anthropic', 'litellm'} & sys.modules.keys()

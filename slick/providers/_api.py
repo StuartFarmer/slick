@@ -7,14 +7,16 @@ injected native clients belong to the application.
 from __future__ import annotations
 
 import math
+import os
 from contextlib import nullcontext
 from dataclasses import KW_ONLY, dataclass, field
 from importlib import import_module
 from typing import Any
 
-from .. import _anthropic_turns, _openai_turns
-from ..tools import prepare_tools
-from ..turns import ModelTurn, ToolResult, UserMessage, validate_history
+from ..turns import ModelTurn, ToolResult, UserMessage, _chat_completions, validate_history
+from ..turns import _anthropic as _anthropic_turns
+from ..turns import _openai as _openai_turns
+from ..turns.tools import prepare_tools
 from ._base import Provider, ProviderError
 
 
@@ -34,8 +36,8 @@ def _validate(model, timeout, max_output_tokens, max_retries):
         raise ValueError("max_retries must be a nonnegative integer")
 
 
-def _client(provider, name, injected, timeout, max_retries):
-    options = {"timeout": timeout, "max_retries": max_retries}
+def _client(provider, name, injected, timeout, max_retries, **sdk_options):
+    options = {"timeout": timeout, "max_retries": max_retries, **sdk_options}
     if injected is not None:
         # SDK option copies share the application's transport; do not close them.
         return nullcontext(injected.with_options(**options))
@@ -79,6 +81,131 @@ def _anthropic_text(response):
     if not text:
         raise ProviderError("Anthropic returned no text content.")
     return "".join(text)
+
+
+def _chat_text(response, provider):
+    if len(response.choices) != 1:
+        raise ProviderError(f"{provider} must return exactly one choice.")
+    choice = response.choices[0]
+    if choice.finish_reason != "stop":
+        raise ProviderError(f"{provider} response did not complete as text.")
+    message = choice.message
+    if any(getattr(message, field, None) for field in ("tool_calls", "function_call", "refusal")):
+        raise ProviderError(f"{provider} returned tool calls or a refusal instead of final text.")
+    if not isinstance(message.content, str):
+        raise ProviderError(f"{provider} returned no text content.")
+    return message.content
+
+
+@dataclass
+class OpenRouterAPI(Provider):
+    """Direct OpenRouter Chat Completions through the optional OpenAI SDK."""
+
+    model: str
+    _: KW_ONLY
+    api_key: str | None = field(default=None, repr=False, compare=False)
+    timeout: float = 60
+    max_output_tokens: int = 2048
+    max_retries: int = 0
+    client: Any = field(default=None, repr=False, compare=False)
+    async_client: Any = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self):
+        _validate(self.model, self.timeout, self.max_output_tokens, self.max_retries)
+        if self.api_key is not None and (
+            not isinstance(self.api_key, str) or not self.api_key.strip()
+        ):
+            raise ValueError("api_key must be a nonempty string")
+
+    def identity(self) -> dict:
+        return {
+            "provider": "openrouter",
+            "model": self.model,
+            "timeout": self.timeout,
+            "max_output_tokens": self.max_output_tokens,
+            "max_retries": self.max_retries,
+        }
+
+    def _client(self, asynchronous=False):
+        injected = self.async_client if asynchronous else self.client
+        key = self.api_key if self.api_key is not None else os.getenv("OPENROUTER_API_KEY")
+        options = {"base_url": "https://openrouter.ai/api/v1"}
+        if key is not None:
+            if not key.strip():
+                raise ProviderError("OPENROUTER_API_KEY must be nonempty.")
+            options["api_key"] = key
+        else:
+            raise ProviderError("Set OPENROUTER_API_KEY or pass api_key to OpenRouterAPI.")
+        return _client(
+            "openai",
+            "AsyncOpenAI" if asynchronous else "OpenAI",
+            injected,
+            self.timeout,
+            self.max_retries,
+            **options,
+        )
+
+    def _request(self, text):
+        return {
+            "model": self.model,
+            "messages": [{"role": "user", "content": text}],
+            "max_tokens": self.max_output_tokens,
+            "stream": False,
+            "n": 1,
+        }
+
+    def call(self, text: str) -> str:
+        try:
+            with self._client() as client:
+                return _chat_text(
+                    client.chat.completions.create(**self._request(text)), "OpenRouter"
+                )
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError("OpenRouter request failed.") from exc
+
+    async def acall(self, text: str) -> str:
+        try:
+            async with self._client(asynchronous=True) as client:
+                response = await client.chat.completions.create(**self._request(text))
+                return _chat_text(response, "OpenRouter")
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError("OpenRouter request failed.") from exc
+
+    async def aturn(
+        self,
+        history: list[UserMessage | ModelTurn | ToolResult],
+        *,
+        tools: list,
+        instructions: str = "",
+    ) -> ModelTurn:
+        """Make one Chat Completions turn without executing tools."""
+        try:
+            prepared = prepare_tools(tools)
+            validate_history(history, provider="openrouter", model=self.model)
+            request = self._request("")
+            request["messages"] = _chat_completions.encode_history(
+                history, instructions=instructions
+            )
+            if prepared:
+                request["tools"] = _chat_completions.tool_definitions(prepared)
+            async with self._client(asynchronous=True) as client:
+                response = await client.chat.completions.create(**request)
+            turn = _chat_completions.decode_turn(
+                response.model_dump(mode="json", exclude_none=True),
+                provider="openrouter",
+                model=self.model,
+            )
+            if turn.tool_calls and not prepared:
+                raise ValueError("OpenRouter returned tool calls with no tools available")
+            return turn
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError("OpenRouter native turn failed.") from exc
 
 
 @dataclass

@@ -1,4 +1,4 @@
-"""Run the example from a checkout; demo mode never uses a model API."""
+"""Run with a model provider, or use --dry-run for the offline scripted demo."""
 
 import argparse
 import asyncio
@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from slick import prompts
-from slick.providers import AnthropicAPI, OpenAIAPI
+from slick.providers import AnthropicAPI, LiteLLMAPI, OpenAIAPI
 
 from .agent import CodingAgent
 from .demo import DemoProvider, create_demo
@@ -33,7 +33,7 @@ async def create_agent(provider_instance, root, config, *, decide, emit, saved=N
         decide=decide,
         command_timeout=config.limits.command_timeout,
     )
-    await workspace.initialize()
+    await workspace.initialize(create=True)
     agent = CodingAgent(provider_instance, workspace, config, emit=emit)
     agent.state.fingerprint = await workspace.fingerprint()
     return agent
@@ -41,9 +41,21 @@ async def create_agent(provider_instance, root, config, *, decide, emit, saved=N
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--provider", choices=["demo", "openai", "anthropic"])
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--provider", choices=["openai", "anthropic", "litellm"], help="default: openai"
+    )
+    mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run the scripted demo in a temporary repository without API calls",
+    )
     parser.add_argument("--model")
-    parser.add_argument("--workspace", type=Path)
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        help="project directory; create it and initialize Git if needed",
+    )
     parser.add_argument("--config", type=Path)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--task")
@@ -87,17 +99,18 @@ def _validate_args(parser, args):
     if args.task and not args.headless:
         parser.error("--task requires --headless; use the input box interactively")
     if args.resume:
-        if any([args.provider, args.model, args.workspace, args.config]):
+        if any([args.provider, args.dry_run, args.model, args.workspace, args.config]):
             parser.error(
-                "--resume cannot be combined with provider/model/workspace/config overrides"
+                "--resume cannot be combined with --dry-run or "
+                "provider/model/workspace/config overrides"
             )
         return
-    args.provider = args.provider or "demo"
-    if args.provider == "demo":
+    args.provider = "demo" if args.dry_run else (args.provider or "openai")
+    if args.dry_run:
         if args.workspace or args.model or args.config:
-            parser.error("Demo owns its temporary workspace, model, and check configuration")
+            parser.error("--dry-run owns its temporary workspace, model, and check configuration")
     elif not args.model or not args.workspace:
-        parser.error("Real providers require --model and --workspace")
+        parser.error("Real providers require --model and --workspace; use --dry-run for the demo")
 
 
 def main(argv=None):
@@ -124,7 +137,11 @@ def main(argv=None):
             provider_instance = (
                 DemoProvider(root)
                 if provider == "demo"
-                else {"openai": OpenAIAPI, "anthropic": AnthropicAPI}[provider](model=model)
+                else {
+                    "openai": OpenAIAPI,
+                    "anthropic": AnthropicAPI,
+                    "litellm": LiteLLMAPI,
+                }[provider](model=model)
             )
             if args.headless:
                 return asyncio.run(_headless(provider_instance, root, config, args.task, saved))

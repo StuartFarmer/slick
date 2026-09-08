@@ -12,8 +12,9 @@ from slick.providers import ProviderError
 @pytest.mark.parametrize(
     "name,cls",
     [
-        ("litellm", "LiteLLMGateway"),
+        ("litellm", "LiteLLMAPI"),
         ("openai", "OpenAIAPI"),
+        ("openrouter", "OpenRouterAPI"),
         ("anthropic", "AnthropicAPI"),
     ],
 )
@@ -39,14 +40,14 @@ def test_explicit_api_provider_receives_stdin_and_model(monkeypatch, capsys, tmp
     assert output.read_text() == "answer:question\n"
 
 
-@pytest.mark.parametrize("name", ["litellm", "openai", "anthropic"])
+@pytest.mark.parametrize("name", ["litellm", "openai", "anthropic", "openrouter"])
 def test_api_model_is_required_even_when_cli_default_exists(monkeypatch, capsys, name):
     monkeypatch.setenv("SLICK_MODEL", "cli-default")
     assert cli.main(["call", "prompt", "--provider", name]) == 2
     assert "--model" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("name", [None, "codex", "claude", "openai", "anthropic"])
+@pytest.mark.parametrize("name", [None, "codex", "claude", "openai", "anthropic", "openrouter"])
 def test_endpoint_flag_is_rejected_for_other_providers(capsys, name):
     args = ["call", "prompt", "--api-base", "http://localhost:8000", "--model", "test"]
     if name:
@@ -79,7 +80,7 @@ def test_api_failures_are_reported_without_traceback(monkeypatch, capsys, error)
     def factory(**kwargs):
         raise error
 
-    monkeypatch.setattr(cli, "LiteLLMGateway", factory)
+    monkeypatch.setattr(cli, "LiteLLMAPI", factory)
     assert cli.main(["call", "prompt", "--provider", "litellm", "--model", "test"]) == 2
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err == f"{error}\n"
@@ -89,7 +90,7 @@ def test_empty_input_is_rejected_before_constructing_provider(monkeypatch, capsy
     def factory(**kwargs):
         raise AssertionError("provider constructed for empty input")
 
-    monkeypatch.setattr(cli, "LiteLLMGateway", factory)
+    monkeypatch.setattr(cli, "LiteLLMAPI", factory)
     monkeypatch.setattr("sys.stdin", StringIO("  \n"))
     assert cli.main(["call", "--provider", "litellm", "--model", "test"]) == 2
     assert "No prompt" in capsys.readouterr().err

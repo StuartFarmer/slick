@@ -6,45 +6,46 @@ The same agent runs in a simple Textual TUI or headlessly. All application code
 and templates live under `examples/`; the installed Slick package supplies only
 the renderer, callable tools, and provider transport.
 
-## Run the offline demo
+## Run with a model
 
 From a repository checkout, on macOS or Linux with Python 3.10+, Git and
 [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on PATH:
 
 ```bash
-python -m pip install -e .
-python -m pip install -r examples/coding_harness/requirements.txt
-python -m examples.coding_harness
-```
-
-Enter `Fix the total calculation`. The demo creates a temporary Git repository
-with a broken `total()` function and two unittest checks. Its **scripted model**
-first makes an incomplete edit, observes a real failing test, then repairs the
-remaining error. Reads, edits, subprocesses, diffs and verification are real;
-the demo makes no API calls. It demonstrates this fixed task, not arbitrary coding.
-The temporary repository is removed when the application exits.
-
-Headless mode needs no Textual installation:
-
-```bash
-python -m examples.coding_harness --provider demo --headless --task 'Fix the total calculation'
-```
-
-## Use a model
-
-Install the corresponding SDK extra and set `OPENAI_API_KEY` or
-`ANTHROPIC_API_KEY` in your environment. Choose an explicit model supporting
-native function tools; real runs make multiple model requests.
-
-```bash
 python -m pip install -e '.[api]'
-python -m examples.coding_harness --provider openai --model YOUR_MODEL_ID --workspace /absolute/repo --config /absolute/checks.json
+python -m pip install -r examples/coding_harness/requirements.txt
+```
+
+Normal runs use **OpenAI by default**. Set `OPENAI_API_KEY` in your environment
+and choose an explicit model supporting native function tools. To use Anthropic,
+set `ANTHROPIC_API_KEY` and pass `--provider anthropic`.
+Real runs make multiple model requests.
+
+```bash
+python -m examples.coding_harness --model YOUR_MODEL_ID --workspace /absolute/repo --config /absolute/checks.json
 python -m examples.coding_harness --provider anthropic --model YOUR_MODEL_ID --workspace /absolute/repo --config /absolute/checks.json
 ```
 
-`--workspace` must identify the exact root of a Git worktree. Existing staged,
-unstaged and untracked changes are preserved and included in the diff view.
-No automatic commit, branch switch, dependency installation or rollback occurs.
+For **LiteLLM with OpenRouter**, install the optional extra and set
+`OPENROUTER_API_KEY` in your environment:
+
+```bash
+python -m pip install -e '.[litellm]'
+python -m examples.coding_harness --provider litellm --model 'openrouter/openai/gpt-oss-120b:nitro' --workspace /absolute/repo --config /absolute/checks.json
+```
+
+LiteLLM needs Python 3.10–3.14. Its `openrouter/` prefix selects the OpenRouter
+route; the remaining `openai/gpt-oss-120b:nitro` is the OpenRouter model ID.
+See [LiteLLM's OpenRouter setup](https://docs.litellm.ai/docs/providers/openrouter).
+Slick translates common history and tool records to LiteLLM's Chat Completions
+format. The harness executes tools and retains its verification/repair loop.
+Saved sessions retain the provider and model; credentials stay in the environment.
+
+`--workspace` can point to a new project directory. On a fresh launch, the harness
+creates missing directories and initializes Git if the directory is not already
+in a repository. Existing repositories must be selected at their exact worktree
+root. Existing staged, unstaged and untracked changes are preserved and included
+in the diff view. No automatic commit, branch switch, dependency installation or rollback occurs.
 Use a disposable repository for a first live trial.
 
 The optional JSON config is loaded only from `--config`; the app does not discover
@@ -72,6 +73,30 @@ Use the intended environment's Python executable in check argv. Missing check
 dependencies produce real failures; the app does not install them. Omitted config
 means no checks and no skills. Omitted limits use the defaults above. Limits must
 be positive integers; context soft limit must be below the hard limit.
+
+## Run the offline demo with --dry-run
+
+```bash
+python -m examples.coding_harness --dry-run
+```
+
+Enter `Fix the total calculation`. The demo creates a temporary Git repository
+with a broken `total()` function and two unittest checks. Its **scripted model**
+first makes an incomplete edit, observes a real failing test, then repairs the
+remaining error. Reads, edits, subprocesses, diffs and verification are real;
+the demo makes no API calls and needs no API key. It demonstrates this fixed task,
+not arbitrary coding. The temporary repository is removed when the application exits.
+
+`--dry-run` replaces `--provider demo` and cannot be combined with `--provider`,
+`--model`, `--workspace`, `--config`, or `--resume`. It runs the disposable fixture;
+it does not preview changes to your own workspace.
+
+Headless mode needs no Textual installation, and the dry run only needs the base
+package (`python -m pip install -e .`):
+
+```bash
+python -m examples.coding_harness --dry-run --headless --task 'Fix the total calculation'
+```
 
 ## Interaction
 
@@ -157,6 +182,7 @@ python -m examples.coding_harness --resume /absolute/path/session.json --headles
 ```
 
 Resume uses the saved provider/model/root/config; launch overrides are rejected.
+The saved workspace and Git repository must still exist; resume does not recreate them.
 Loading validates records and complete tool/result groups and never replays actions.
 Changed HEAD or file fingerprints invalidate saved verification and add a fresh
 workspace observation. A saved demo session cannot resume after its temporary
@@ -182,9 +208,10 @@ Edit the Jinja files to change instructions. Add a skill template to the explici
 `SKILLS` mapping to make it selectable. Retrieval, memory, extra application methods
 and alternate verification are ordinary Python changes here.
 
-Core `OpenAIAPI.aturn` and `AnthropicAPI.aturn` perform one native request. This app owns
-the loop and history. CLI harness providers, OpenRouter, parallel tools, durable
-execution, multimodal inputs and hosted/server tools are outside this example.
+Core `OpenAIAPI.aturn`, `AnthropicAPI.aturn`, and `LiteLLMAPI.aturn` perform one
+request. This app owns the loop and history. OpenRouter is available
+through LiteLLM. CLI harness providers, parallel tool execution, durable execution,
+multimodal inputs and hosted/server tools are outside this example.
 
 ## Tests
 

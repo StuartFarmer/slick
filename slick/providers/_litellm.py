@@ -8,6 +8,9 @@ from copy import deepcopy
 from dataclasses import KW_ONLY, dataclass, field
 from importlib import import_module
 
+from ..turns import ModelTurn, ToolResult, UserMessage, _chat_completions, validate_history
+from ..turns.tools import prepare_tools
+from ._api import _chat_text
 from ._base import Provider, ProviderError
 
 _RESERVED_OPTIONS = {
@@ -55,22 +58,8 @@ def _sdk():
         raise ProviderError(message) from exc
 
 
-def _text(response):
-    if len(response.choices) != 1:
-        raise ProviderError("LiteLLM must return exactly one choice.")
-    choice = response.choices[0]
-    if choice.finish_reason != "stop":
-        raise ProviderError("LiteLLM response did not complete as text.")
-    message = choice.message
-    if any(getattr(message, field, None) for field in ("tool_calls", "function_call", "refusal")):
-        raise ProviderError("LiteLLM returned tool calls or a refusal instead of final text.")
-    if not isinstance(message.content, str):
-        raise ProviderError("LiteLLM returned no text content.")
-    return message.content
-
-
 @dataclass
-class LiteLLMGateway(Provider):
+class LiteLLMAPI(Provider):
     """Provider-prefixed model access through the optional LiteLLM SDK.
 
     Options are provider-specific inference settings. Calls do not configure
@@ -130,7 +119,7 @@ class LiteLLMGateway(Provider):
 
     def call(self, text: str) -> str:
         try:
-            return _text(_sdk().completion(**self._request(text)))
+            return _chat_text(_sdk().completion(**self._request(text)), "LiteLLM")
         except ProviderError:
             raise
         except Exception as exc:
@@ -138,8 +127,39 @@ class LiteLLMGateway(Provider):
 
     async def acall(self, text: str) -> str:
         try:
-            return _text(await _sdk().acompletion(**self._request(text)))
+            return _chat_text(await _sdk().acompletion(**self._request(text)), "LiteLLM")
         except ProviderError:
             raise
         except Exception as exc:
             raise ProviderError("LiteLLM request failed.") from exc
+
+    def identity(self) -> dict:
+        return {"provider": "litellm", "model": self.model}
+
+    async def aturn(
+        self,
+        history: list[UserMessage | ModelTurn | ToolResult],
+        *,
+        tools: list,
+        instructions: str = "",
+    ) -> ModelTurn:
+        """Make one Chat Completions turn without executing tools."""
+        try:
+            prepared = prepare_tools(tools)
+            validate_history(history, provider="litellm", model=self.model)
+            request = self._request("")
+            request["messages"] = _chat_completions.encode_history(
+                history, instructions=instructions
+            )
+            if prepared:
+                request["tools"] = _chat_completions.tool_definitions(prepared)
+            response = await _sdk().acompletion(**request)
+            raw = response.model_dump(mode="json", exclude_none=True)
+            turn = _chat_completions.decode_turn(raw, provider="litellm", model=self.model)
+            if turn.tool_calls and not prepared:
+                raise ValueError("LiteLLM returned tool calls with no tools available")
+            return turn
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError("LiteLLM native turn failed.") from exc

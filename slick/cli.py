@@ -14,8 +14,9 @@ from pathlib import Path
 from . import __version__
 from .providers import (
     AnthropicAPI,
-    LiteLLMGateway,
+    LiteLLMAPI,
     OpenAIAPI,
+    OpenRouterAPI,
     ProviderError,
     get_command,
     get_default,
@@ -34,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     call.add_argument("prompt", nargs="?", help="Prompt text; read from stdin if omitted")
     call.add_argument(
         "--provider",
-        choices=sorted(set(COMMANDS) | {"litellm", "openai", "anthropic"}),
+        choices=sorted(set(COMMANDS) | {"litellm", "openai", "anthropic", "openrouter"}),
         help="Provider to use",
     )
     call.add_argument("--model", help="Model id to pass to the provider")
@@ -60,7 +61,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.api_base is not None and args.provider != "litellm":
             raise ValueError("--api-base requires --provider litellm.")
-        api_providers = {"litellm": LiteLLMGateway, "openai": OpenAIAPI, "anthropic": AnthropicAPI}
+        api_providers = {
+            "litellm": LiteLLMAPI,
+            "openai": OpenAIAPI,
+            "anthropic": AnthropicAPI,
+            "openrouter": OpenRouterAPI,
+        }
         if args.provider in api_providers:
             if not args.model:
                 raise ValueError("API providers require --model.")

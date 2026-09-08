@@ -3,20 +3,22 @@
 import argparse
 from pathlib import Path
 
-from slick import get_model, prompts
-from slick.backends import Anthropic, OpenAI
+from slick import prompts
+from slick.providers import AnthropicAPI, OpenAIAPI, get_command
 
 
 def parser(description: str) -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=description)
     result.add_argument(
-        "--backend",
+        "--provider",
         choices=["demo", "openai", "anthropic", "codex", "claude"],
         default="demo",
         help="demo uses canned responses; other choices make real calls",
     )
     result.add_argument("--model", help="required model ID for OpenAI/Anthropic")
-    result.add_argument("--timeout", type=positive_int, default=60, help="seconds per backend call")
+    result.add_argument(
+        "--timeout", type=positive_int, default=60, help="seconds per provider call"
+    )
     return result
 
 
@@ -27,23 +29,23 @@ def positive_int(value: str) -> int:
     return number
 
 
-def backend_from_args(args, argument_parser, demo):
+def provider_from_args(args, argument_parser, demo):
     prompts.TEMPLATE_ROOT = Path(__file__).with_name("prompts")
-    if args.backend == "demo":
+    if args.provider == "demo":
         if args.model:
-            argument_parser.error("--model requires a real backend")
+            argument_parser.error("--model requires a real provider")
         return demo
-    if args.backend in {"openai", "anthropic"}:
+    if args.provider in {"openai", "anthropic"}:
         if not args.model:
-            argument_parser.error("--model is required for API backends")
-        provider = OpenAI if args.backend == "openai" else Anthropic
+            argument_parser.error("--model is required for API providers")
+        provider = OpenAIAPI if args.provider == "openai" else AnthropicAPI
         return provider(model=args.model, timeout=args.timeout)
-    backend = get_model(args.backend, args.model)
-    backend.timeout = args.timeout
-    return backend
+    provider = get_command(args.provider, args.model)
+    provider.timeout = args.timeout
+    return provider
 
 
-class ScriptedBackend:
+class ScriptedProvider:
     """Offline responses; loops still render, parse, execute tools, and update state."""
 
     def __init__(self, responses):

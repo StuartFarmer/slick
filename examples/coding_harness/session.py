@@ -146,10 +146,10 @@ def load_session(path: Path) -> SavedSession:
     return SavedSession.model_validate(parsed)
 
 
-async def restore_session(saved: SavedSession, backend, *, decide, emit) -> CodingAgent:
-    identity = backend.identity()
+async def restore_session(saved: SavedSession, provider, *, decide, emit) -> CodingAgent:
+    identity = provider.identity()
     if identity["provider"] != saved.provider or identity["model"] != saved.model:
-        raise ValueError("Session provider/model does not match backend")
+        raise ValueError("Session provider/model does not match provider")
     root = Path(saved.root)
     if not root.is_absolute() or root.resolve() != root:
         raise ValueError("Session workspace root must be an absolute resolved path")
@@ -161,7 +161,7 @@ async def restore_session(saved: SavedSession, backend, *, decide, emit) -> Codi
     )
     await workspace.initialize()
     fingerprint = await workspace.fingerprint()
-    agent = CodingAgent(backend, workspace, saved.config, emit=emit)
+    agent = CodingAgent(provider, workspace, saved.config, emit=emit)
     workspace.edit_ledger = [entry.model_dump() for entry in saved.edit_ledger]
     agent.state = SessionState(
         provider=saved.provider,

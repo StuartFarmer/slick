@@ -9,7 +9,7 @@ from examples.coding_harness.state import HarnessConfig
 from slick.turns import UserMessage
 
 
-class Backend:
+class FakeProvider:
     def identity(self):
         return {"provider": "demo", "model": "scripted"}
 
@@ -19,14 +19,14 @@ async def deny(request):
 
 
 def test_explicit_save_restore_is_inert_and_does_not_restore_allowances(workspace, tmp_path):
-    agent = CodingAgent(Backend(), workspace, HarnessConfig())
+    agent = CodingAgent(FakeProvider(), workspace, HarnessConfig())
     agent.state.history = [UserMessage("Read only")]
     agent.state.fingerprint = asyncio.run(workspace.fingerprint())
     path = tmp_path.parent / (tmp_path.name + "-session.json")
     workspace.allowed_commands.add((str(workspace.root), ("unapproved",)))
     save_session(path, agent)
     restored = asyncio.run(
-        restore_session(load_session(path), Backend(), decide=deny, emit=lambda e: None)
+        restore_session(load_session(path), FakeProvider(), decide=deny, emit=lambda e: None)
     )
     assert restored.state.history == agent.state.history
     assert restored.workspace.allowed_commands == restored.workspace.configured_commands
@@ -35,21 +35,21 @@ def test_explicit_save_restore_is_inert_and_does_not_restore_allowances(workspac
 
 
 def test_saved_changed_workspace_invalidates_prior_context(workspace, tmp_path):
-    agent = CodingAgent(Backend(), workspace, HarnessConfig())
+    agent = CodingAgent(FakeProvider(), workspace, HarnessConfig())
     agent.state.history = [UserMessage("Read only")]
     agent.state.fingerprint = asyncio.run(workspace.fingerprint())
     path = tmp_path.parent / (tmp_path.name + "-changed.json")
     save_session(path, agent)
     (workspace.root / "new.py").write_text("changed")
     restored = asyncio.run(
-        restore_session(load_session(path), Backend(), decide=deny, emit=lambda e: None)
+        restore_session(load_session(path), FakeProvider(), decide=deny, emit=lambda e: None)
     )
     assert "changed" in restored.state.history[-1].text.lower()
     assert (workspace.root / "new.py").read_text() == "changed"
 
 
 def test_save_requires_idle_external_path_and_known_json_version(workspace, tmp_path):
-    agent = CodingAgent(Backend(), workspace, HarnessConfig())
+    agent = CodingAgent(FakeProvider(), workspace, HarnessConfig())
     agent.state.history = [UserMessage("hello")]
     with pytest.raises(ValueError, match="outside"):
         save_session(workspace.root / "session.json", agent)
@@ -66,7 +66,7 @@ def test_save_requires_idle_external_path_and_known_json_version(workspace, tmp_
 def test_loaded_records_are_strictly_validated(workspace, tmp_path, corruption):
     from slick.turns import ModelTurn, ToolCall, ToolResult
 
-    agent = CodingAgent(Backend(), workspace, HarnessConfig())
+    agent = CodingAgent(FakeProvider(), workspace, HarnessConfig())
     agent.state.history = [
         UserMessage("Read"),
         ModelTurn(
@@ -96,7 +96,7 @@ def test_loaded_records_are_strictly_validated(workspace, tmp_path, corruption):
 
 
 def test_save_rejects_dangling_symlink_destination(workspace, tmp_path):
-    agent = CodingAgent(Backend(), workspace, HarnessConfig())
+    agent = CodingAgent(FakeProvider(), workspace, HarnessConfig())
     agent.state.history = [UserMessage("Read")]
     destination = tmp_path.parent / (tmp_path.name + "-link.json")
     target = tmp_path.parent / (tmp_path.name + "-target.json")
@@ -111,7 +111,7 @@ def test_native_groups_archives_and_edit_ledger_round_trip(workspace, tmp_path):
 
     from slick.turns import ModelTurn, ToolCall, ToolResult
 
-    agent = CodingAgent(Backend(), workspace, HarnessConfig())
+    agent = CodingAgent(FakeProvider(), workspace, HarnessConfig())
     workspace.create_file("new.py", "value = 2\n")
     agent.state.fingerprint = asyncio.run(workspace.fingerprint())
     group = [
@@ -137,7 +137,7 @@ def test_native_groups_archives_and_edit_ledger_round_trip(workspace, tmp_path):
     save_session(path, agent)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     restored = asyncio.run(
-        restore_session(load_session(path), Backend(), decide=deny, emit=lambda e: None)
+        restore_session(load_session(path), FakeProvider(), decide=deny, emit=lambda e: None)
     )
     assert restored.state.history == group
     assert restored.state.archived_histories == [group]
@@ -146,11 +146,11 @@ def test_native_groups_archives_and_edit_ledger_round_trip(workspace, tmp_path):
 
 
 def test_fresh_idle_conversation_can_be_saved_and_resumed(workspace, tmp_path):
-    agent = CodingAgent(Backend(), workspace, HarnessConfig())
+    agent = CodingAgent(FakeProvider(), workspace, HarnessConfig())
     agent.state.fingerprint = asyncio.run(workspace.fingerprint())
     path = tmp_path.parent / (tmp_path.name + "-empty.json")
     save_session(path, agent)
     restored = asyncio.run(
-        restore_session(load_session(path), Backend(), decide=deny, emit=lambda e: None)
+        restore_session(load_session(path), FakeProvider(), decide=deny, emit=lambda e: None)
     )
     assert restored.state.history == []

@@ -1,18 +1,18 @@
-"""Model primitive: one prompt in, one text response out.
+"""CLI providers: one prompt in, one text response out.
 
-    model = get_model()                  # the resolved default backend
-    model = get_model("claude")          # or by name
-    report = model.call(prompt)          # -> str
+    provider = get_command()                  # the resolved default provider
+    provider = get_command("claude")          # or by name
+    report = provider.call(prompt)          # -> str
 
-Models are CLI-backed (Claude Code headless, codex exec) so calls run on
-subscription billing rather than metered API tokens. Give a model
-everything it needs in the prompt; there is no workspace and no
-conversation. `execute()` is the low-level engine — it takes a workdir
-and a sandbox, which is what a long-running workspace task needs.
+CLI providers (Claude Code headless, codex exec) use the invoked CLI's
+authentication and billing configuration. Give a provider everything it
+needs in the prompt; each call starts a new invocation in the configured
+working directory. `execute()` also accepts per-call workdir and sandbox
+settings, whose permission semantics depend on the CLI.
 
-Which backend you get, in order: the argument to get_model(), whatever
-set_default() was last called with, $SLICK_BACKEND / $SLICK_MODEL, then
-DEFAULT_BACKEND.
+Which provider you get, in order: the argument to get_command(), whatever
+set_default() was last called with, $SLICK_PROVIDER / $SLICK_MODEL, then
+DEFAULT_PROVIDER.
 """
 
 from __future__ import annotations
@@ -24,22 +24,20 @@ import shlex
 import signal
 import subprocess
 import sys
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+from ._base import Provider, ProviderError
+
 DEFAULT_CODEX_BIN = "codex"
 DEFAULT_CLAUDE_CMD = "claude -p --output-format text --permission-mode bypassPermissions"
-DEFAULT_BACKEND = "codex"
-
-
-class ModelError(Exception):
-    pass
+DEFAULT_PROVIDER = "codex"
 
 
 @dataclass(frozen=True)
 class ExecutionResult:
-    """Outcome of one model execution.
+    """Outcome of one CLI execution.
 
     final_message: the closing message (report, answer).
     transcript: everything printed while working.
@@ -49,15 +47,23 @@ class ExecutionResult:
     transcript: str
 
 
-class Model(ABC):
-    """A CLI-backed model: one prompt in, one text response out."""
+class Command(Provider):
+    """A CLI provider: one prompt in, one text response out."""
 
-    backend: str = "model"
+    provider: str = "model"
 
-    def __init__(self, command: str, model: str | None = None, timeout: int = 3600) -> None:
+    def __init__(
+        self,
+        command: str,
+        model: str | None = None,
+        timeout: int = 3600,
+        *,
+        workdir: Path | str | None = None,
+    ) -> None:
         self.command = command
         self.model = model
         self.timeout = timeout
+        self.workdir = Path(workdir) if workdir is not None else None
 
     def call(self, prompt: str) -> str:
         """Single call with complete context, returning the response text."""
@@ -75,11 +81,10 @@ class Model(ABC):
     ) -> ExecutionResult:
         """Low-level engine: run `prompt` through the CLI. Everything flows
         through stdout as strings."""
-        if workdir is not None:
-            workdir = Path(workdir)
+        workdir = self.workdir if workdir is None else Path(workdir)
 
         command = self._command(workdir=workdir, sandbox=sandbox)
-        transcript = self._run_process(command, prompt, workdir=workdir, label=self.backend)
+        transcript = self._run_process(command, prompt, workdir=workdir, label=self.provider)
 
         return ExecutionResult(final_message=self._parse_final(transcript), transcript=transcript)
 
@@ -90,10 +95,9 @@ class Model(ABC):
         sandbox: str = "read-only",
     ) -> ExecutionResult:
         """Run the CLI asynchronously; cancellation kills and reaps its process."""
-        if workdir is not None:
-            workdir = Path(workdir)
+        workdir = self.workdir if workdir is None else Path(workdir)
         command = self._command(workdir=workdir, sandbox=sandbox)
-        transcript = await self._arun_process(command, prompt, workdir=workdir, label=self.backend)
+        transcript = await self._arun_process(command, prompt, workdir=workdir, label=self.provider)
         return ExecutionResult(final_message=self._parse_final(transcript), transcript=transcript)
 
     @abstractmethod
@@ -123,11 +127,11 @@ class Model(ABC):
                 timeout=self.timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            raise ModelError(f"{label} timed out after {self.timeout}s.") from exc
+            raise ProviderError(f"{label} timed out after {self.timeout}s.") from exc
 
         if result.returncode != 0:
             detail = (result.stderr or result.stdout).strip()[-2000:]
-            raise ModelError(f"{label} failed (exit {result.returncode}): {detail}")
+            raise ProviderError(f"{label} failed (exit {result.returncode}): {detail}")
         return result.stdout
 
     async def _arun_process(
@@ -165,19 +169,19 @@ class Model(ABC):
             await communication
             await process.wait()
             if isinstance(exc, asyncio.TimeoutError):
-                raise ModelError(f"{label} timed out after {self.timeout}s.") from exc
+                raise ProviderError(f"{label} timed out after {self.timeout}s.") from exc
             raise
 
         if process.returncode != 0:
             detail = (stderr or stdout).decode().strip()[-2000:]
-            raise ModelError(f"{label} failed (exit {process.returncode}): {detail}")
+            raise ProviderError(f"{label} failed (exit {process.returncode}): {detail}")
         return stdout.decode()
 
 
-class ClaudeModel(Model):
+class ClaudeCLI(Command):
     """Claude Code headless: the final message is stdout."""
 
-    backend = "claude"
+    provider = "claude"
 
     def __init__(self, command: str = DEFAULT_CLAUDE_CMD, **kwargs) -> None:
         super().__init__(command, **kwargs)
@@ -189,11 +193,11 @@ class ClaudeModel(Model):
         return command
 
 
-class CodexModel(Model):
+class CodexCLI(Command):
     """codex exec --json: JSONL events stream on stdout; the final message
     is the last agent_message event."""
 
-    backend = "codex"
+    provider = "codex"
 
     def __init__(self, command: str = DEFAULT_CODEX_BIN, **kwargs) -> None:
         super().__init__(command, **kwargs)
@@ -202,7 +206,8 @@ class CodexModel(Model):
         base = [sys.executable, self.command] if self.command.endswith(".py") else [self.command]
         command = [*base, "exec", "--json", "--sandbox", sandbox]
         if workdir is not None:
-            command.extend(["--cd", str(workdir)])
+            # The child already starts in workdir; a relative --cd would apply it twice.
+            command.extend(["--cd", str(workdir.absolute())])
         if self.model:
             command.extend(["--model", self.model])
         command.append("-")
@@ -221,36 +226,36 @@ class CodexModel(Model):
         return final
 
 
-BACKENDS: dict[str, type[Model]] = {
-    "claude": ClaudeModel,
-    "codex": CodexModel,
+COMMANDS: dict[str, type[Command]] = {
+    "claude": ClaudeCLI,
+    "codex": CodexCLI,
 }
 
-_default_backend: str | None = None
+_default_provider: str | None = None
 _default_model: str | None = None
 
 
-def set_default(backend: str | None = None, model: str | None = None) -> None:
-    """Set the process-wide default backend and/or model id."""
-    global _default_backend, _default_model
-    if backend is not None:
-        if backend not in BACKENDS:
-            raise KeyError(f"Unknown backend {backend!r}; expected one of {', '.join(BACKENDS)}.")
-        _default_backend = backend
+def set_default(provider: str | None = None, model: str | None = None) -> None:
+    """Set the process-wide default provider and/or model id."""
+    global _default_provider, _default_model
+    if provider is not None:
+        if provider not in COMMANDS:
+            raise KeyError(f"Unknown provider {provider!r}; expected one of {', '.join(COMMANDS)}.")
+        _default_provider = provider
     if model is not None:
         _default_model = model
 
 
 def get_default() -> tuple[str, str | None]:
-    """The backend and model id a bare get_model() would use."""
-    backend = _default_backend or os.getenv("SLICK_BACKEND") or DEFAULT_BACKEND
-    return backend, _default_model or os.getenv("SLICK_MODEL")
+    """The provider and model id a bare get_command() would use."""
+    provider = _default_provider or os.getenv("SLICK_PROVIDER") or DEFAULT_PROVIDER
+    return provider, _default_model or os.getenv("SLICK_MODEL")
 
 
-def get_model(backend: str | None = None, model: str | None = None, **properties) -> Model:
-    """Build a model. Unset arguments fall back to the resolved default."""
-    default_backend, default_model = get_default()
-    backend = backend or default_backend
-    if backend not in BACKENDS:
-        raise KeyError(f"Unknown backend {backend!r}; expected one of {', '.join(BACKENDS)}.")
-    return BACKENDS[backend](model=model or default_model, **properties)
+def get_command(provider: str | None = None, model: str | None = None, **properties) -> Command:
+    """Build a CLI provider. Unset arguments fall back to the resolved default."""
+    default_provider, default_model = get_default()
+    provider = provider or default_provider
+    if provider not in COMMANDS:
+        raise KeyError(f"Unknown provider {provider!r}; expected one of {', '.join(COMMANDS)}.")
+    return COMMANDS[provider](model=model or default_model, **properties)

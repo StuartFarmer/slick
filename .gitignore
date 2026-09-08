@@ -19,6 +19,7 @@ ENV/
 
 # Prompt run logs (see slick.prompts.LOG_DIR)
 logs/
+docs/
 
 # Test and coverage
 .coverage
@@ -27,6 +28,8 @@ logs/
 .pytest_cache/
 .ruff_cache/
 htmlcov/
+.mypy_cache/
+
 
 # IDE
 .vscode/
@@ -34,3 +37,8 @@ htmlcov/
 
 # macOS
 .DS_Store
+
+# LLMs
+.agents/
+.rtk/
+skills-lock.json

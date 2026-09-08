@@ -11,7 +11,7 @@ import sys
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from examples._cli import ScriptedBackend, backend_from_args, parser, positive_int
+from examples._cli import ScriptedProvider, parser, positive_int, provider_from_args
 from slick import Prompt, parse
 
 CRITERIA = [
@@ -40,10 +40,10 @@ class Reflection(BaseModel):
 class ReflectiveSolver:
     """Own attempts, checker feedback, and accumulated lessons for one toy task."""
 
-    def __init__(self, backend, task: str = "Find a valid list.", *, max_attempts: int = 3):
+    def __init__(self, provider, task: str = "Find a valid list.", *, max_attempts: int = 3):
         if type(max_attempts) is not int or max_attempts < 1:
             raise ValueError("max_attempts must be a positive integer")
-        self.backend = backend
+        self.provider = provider
         self.task = task
         self.max_attempts = max_attempts
         self.attempt_count = 0
@@ -64,7 +64,7 @@ class ReflectiveSolver:
             state={"facts": CRITERIA, "decisions": self.lessons, "questions": []},
             schema=Candidate.model_json_schema(),
         )
-        return parse(await self.backend.acall(text), Candidate)
+        return parse(await self.provider.acall(text), Candidate)
 
     def evaluate(self, candidate: Candidate) -> Feedback:
         """Compute feedback in Python; the model cannot declare its own success."""
@@ -93,7 +93,7 @@ class ReflectiveSolver:
             lessons=self.lessons,
             schema=Reflection.model_json_schema(),
         )
-        reflection = parse(await self.backend.acall(text), Reflection)
+        reflection = parse(await self.provider.acall(text), Reflection)
         self.lessons.append(reflection.lesson)
         return reflection
 
@@ -121,15 +121,15 @@ def main(argv=None) -> int:
     )
     argument_parser.add_argument("--attempts", type=positive_int, default=3)
     args = argument_parser.parse_args(argv)
-    demo = ScriptedBackend(
+    demo = ScriptedProvider(
         [
             '{"numbers":[2,2,14]}',
             '{"lesson":"Check distinctness; replace the repeated 2 and rebalance the sum."}',
             '{"numbers":[2,4,12]}',
         ]
     )
-    backend = backend_from_args(args, argument_parser, demo)
-    solver = ReflectiveSolver(backend, args.task, max_attempts=args.attempts)
+    provider = provider_from_args(args, argument_parser, demo)
+    solver = ReflectiveSolver(provider, args.task, max_attempts=args.attempts)
     try:
         result = asyncio.run(solver.run())
     except (RuntimeError, ValueError) as exc:

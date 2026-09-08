@@ -138,9 +138,9 @@ class HarnessApp(App):
     #task { height: 3; }
     """
 
-    def __init__(self, backend, workspace_root: Path, config: HarnessConfig, *, saved=None):
+    def __init__(self, provider, workspace_root: Path, config: HarnessConfig, *, saved=None):
         super().__init__()
-        self.backend = backend
+        self.provider = provider
         self.workspace_root = Path(workspace_root).resolve()
         self.config = config
         self.saved = saved
@@ -151,7 +151,7 @@ class HarnessApp(App):
         self._status = "Initializing workspace"
 
     def compose(self) -> ComposeResult:
-        identity = self.backend.identity()
+        identity = self.provider.identity()
         yield Static(
             plain(
                 f"Slick coding example · {identity['provider']} / {identity['model']}\n"
@@ -173,7 +173,7 @@ class HarnessApp(App):
         self.on_resize()
         try:
             self.agent = await create_agent(
-                self.backend,
+                self.provider,
                 self.workspace_root,
                 self.config,
                 decide=self.request_command,

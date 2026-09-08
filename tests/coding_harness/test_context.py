@@ -8,7 +8,7 @@ from examples.coding_harness.state import HarnessConfig
 from slick.turns import ModelTurn, ToolCall, UserMessage
 
 
-class SummaryBackend:
+class SummaryProvider:
     def __init__(self, answer):
         self.answer = answer
 
@@ -21,11 +21,11 @@ class SummaryBackend:
 
 
 def test_compaction_swaps_complete_history_only_after_validation(workspace):
-    backend = SummaryBackend(
+    provider = SummaryProvider(
         '{"facts":["API uses integers"],"decisions":[],"open_questions":[],'
         '"modified_files":[],"next_steps":[]}'
     )
-    agent = CodingAgent(backend, workspace, HarnessConfig(skills=["python"]))
+    agent = CodingAgent(provider, workspace, HarnessConfig(skills=["python"]))
     agent.state.history = [UserMessage("Keep the API stable")]
     asyncio.run(agent.compact())
     assert len(agent.state.archived_histories) == 1
@@ -34,7 +34,7 @@ def test_compaction_swaps_complete_history_only_after_validation(workspace):
 
 
 def test_bad_summary_preserves_history(workspace):
-    agent = CodingAgent(SummaryBackend("not JSON"), workspace, HarnessConfig())
+    agent = CodingAgent(SummaryProvider("not JSON"), workspace, HarnessConfig())
     agent.state.history = [UserMessage("Keep me")]
     before = list(agent.state.history)
     with pytest.raises(ValueError):
@@ -44,7 +44,7 @@ def test_bad_summary_preserves_history(workspace):
 
 
 def test_pending_calls_cannot_compact(workspace):
-    agent = CodingAgent(SummaryBackend("unused"), workspace, HarnessConfig())
+    agent = CodingAgent(SummaryProvider("unused"), workspace, HarnessConfig())
     agent.state.history = [
         UserMessage("Read"),
         ModelTurn(
@@ -67,16 +67,16 @@ def test_manual_compaction_blocks_a_concurrent_run(workspace):
     async def scenario():
         started, release = asyncio.Event(), asyncio.Event()
 
-        class WaitingSummary(SummaryBackend):
+        class WaitingSummary(SummaryProvider):
             async def aturn(self, *args, **kwargs):
                 started.set()
                 await release.wait()
                 return await super().aturn(*args, **kwargs)
 
-        backend = WaitingSummary(
+        provider = WaitingSummary(
             '{"facts":[],"decisions":[],"open_questions":[],"modified_files":[],"next_steps":[]}'
         )
-        agent = CodingAgent(backend, workspace, HarnessConfig())
+        agent = CodingAgent(provider, workspace, HarnessConfig())
         agent.state.history = [UserMessage("old context")]
         task = asyncio.create_task(agent.compact())
         try:
@@ -93,12 +93,12 @@ def test_manual_compaction_blocks_a_concurrent_run(workspace):
 
 def test_summary_transport_failure_below_hard_limit_keeps_working(workspace):
     from examples.coding_harness.state import Limits
-    from slick.backends import BackendError
+    from slick.providers import ProviderError
 
-    class SummaryFailure(SummaryBackend):
+    class SummaryFailure(SummaryProvider):
         async def aturn(self, history, *, tools, instructions=""):
             if not tools:
-                raise BackendError("summary request unavailable")
+                raise ProviderError("summary request unavailable")
             return ModelTurn("demo", "scripted", "Completed normally", [], [], "end_turn")
 
     agent = CodingAgent(
@@ -115,9 +115,9 @@ def test_summary_transport_failure_below_hard_limit_keeps_working(workspace):
 def test_oversized_pinned_context_stops_before_any_request(workspace):
     from examples.coding_harness.state import Limits
 
-    class NoRequests(SummaryBackend):
+    class NoRequests(SummaryProvider):
         async def aturn(self, *args, **kwargs):
-            pytest.fail("oversized pinned input must not reach the backend")
+            pytest.fail("oversized pinned input must not reach the provider")
 
     agent = CodingAgent(
         NoRequests(""),
@@ -133,7 +133,7 @@ def test_oversized_pinned_context_stops_before_any_request(workspace):
 
 def test_unknown_skill_fails_before_execution(workspace):
     with pytest.raises(ValueError, match="Unknown skills"):
-        CodingAgent(SummaryBackend(""), workspace, HarnessConfig(skills=["missing"]))
+        CodingAgent(SummaryProvider(""), workspace, HarnessConfig(skills=["missing"]))
 
 
 def test_bounded_summary_retains_complete_recent_exchange():

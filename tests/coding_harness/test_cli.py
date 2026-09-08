@@ -3,7 +3,7 @@ import subprocess
 import sys
 
 from examples.coding_harness.__main__ import create_agent
-from examples.coding_harness.demo import DemoBackend, create_demo
+from examples.coding_harness.demo import DemoProvider, create_demo
 
 
 async def deny(request):
@@ -16,7 +16,7 @@ def test_demo_repairs_a_real_failure(tmp_path):
 
     async def run():
         agent = await create_agent(
-            DemoBackend(tmp_path), tmp_path, config, decide=deny, emit=events.append
+            DemoProvider(tmp_path), tmp_path, config, decide=deny, emit=events.append
         )
         return await agent.run("Fix the total calculation")
 
@@ -42,7 +42,7 @@ def guarded(name, *args, **kwargs):
     return real(name, *args, **kwargs)
 builtins.__import__ = guarded
 from examples.coding_harness.__main__ import main
-raise SystemExit(main(['--backend','demo','--headless','--task','Fix total']))
+raise SystemExit(main(['--provider','demo','--headless','--task','Fix total']))
 """
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, timeout=30
@@ -52,9 +52,9 @@ raise SystemExit(main(['--backend','demo','--headless','--task','Fix total']))
     assert "1 repair" in result.stdout
 
 
-def test_real_backend_requires_workspace_and_model():
+def test_real_provider_requires_workspace_and_model():
     result = subprocess.run(
-        [sys.executable, "-m", "examples.coding_harness", "--backend", "openai"],
+        [sys.executable, "-m", "examples.coding_harness", "--provider", "openai"],
         capture_output=True,
         text=True,
         timeout=10,

@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Native async `OpenAI.aturn` and `Anthropic.aturn` with callable tool definitions,
+- Native async `OpenAIAPI.aturn` and `AnthropicAPI.aturn` with callable tool definitions,
   structured history, correlated results and preserved provider payloads. Each
   request returns one turn; applications own execution and history.
 - Independent coding harness example with a Textual TUI, headless offline demo,
@@ -16,12 +16,12 @@ All notable changes to this project will be documented in this file.
   inferred schemas, bound methods, strict argument/return validation, sync/async
   invocation, and phased `ToolError` diagnostics. No decorator or provider loop.
 - Automated callable-tool contract tests, including Python 3.10/Pydantic 2.0 checks.
-- Rendering-only `Prompt("file.j2")` callable, independent of backends and state.
+- Rendering-only `Prompt("file.j2")` callable, independent of providers and state.
 - `QuestionAnswerer` example showing ordinary class methods and instance-owned
   history with separate answer and critique templates.
 - Public `render(template, **variables)` and `parse(text, returns=str)` functions,
   shared with the prompt decorator.
-- `@prompt(backend=...)` and native async decorated calls/rendering; modern calls
+- `@prompt(provider=...)` and native async decorated calls/rendering; modern calls
   default to no logging, cache or automatic repair. Legacy sync defaults remain.
 - Optional OpenAI Responses and Anthropic Messages adapters with sync/async calls,
   explicit limits/retries, lazy SDK loading and owned/injected client lifecycle.
@@ -29,6 +29,12 @@ All notable changes to this project will be documented in this file.
 - Offline examples for summaries, templated conversation history and retrieval.
 
 ### Changed
+- Provider implementations now live in `slick.providers`, with descriptive
+  `CodexCLI`, `ClaudeCLI`, `OpenAIAPI`, `AnthropicAPI`, and `LiteLLMGateway` classes.
+- Provider selection uses `@prompt(provider=...)`, `--provider`, `SLICK_PROVIDER`,
+  and `slick provider`. The CLI-only factory is `get_command`.
+- Removed short class aliases and obsolete compatibility modules; callers must
+  use the canonical provider names. Examples and tests follow the same naming.
 - Two prompting examples use string constraints compatible with Pydantic 2.0.
 - Prompt validation errors expose the rejected text in `.response`.
 - API SDKs are optional extras; the core still depends only on Jinja2 and Pydantic.

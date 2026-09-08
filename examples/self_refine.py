@@ -4,15 +4,15 @@ import asyncio
 
 from slick import Prompt
 
-from ._cli import ScriptedBackend, backend_from_args, parser, positive_int
+from ._cli import ScriptedProvider, parser, positive_int, provider_from_args
 
 
 class SelfRefiner:
     """One task with explicit answer, feedback, and revision history; use sequentially."""
 
-    def __init__(self, task, backend, criteria):
+    def __init__(self, task, provider, criteria):
         self.task = task
-        self.backend = backend
+        self.provider = provider
         self.criteria = list(criteria)
         self.answer = None
         self.feedback = None
@@ -24,7 +24,7 @@ class SelfRefiner:
 
     async def draft(self):
         text = self.draft_prompt(task=self.task)
-        answer = await self.backend.acall(text)
+        answer = await self.provider.acall(text)
         self.answer, self.feedback = answer, None
         self.revisions, self.feedback_history = [answer], []
         return answer
@@ -39,7 +39,7 @@ class SelfRefiner:
             revisions=self.revisions,
             feedback_history=self.feedback_history,
         )
-        self.feedback = await self.backend.acall(text)
+        self.feedback = await self.provider.acall(text)
         return self.feedback
 
     async def revise(self):
@@ -52,7 +52,7 @@ class SelfRefiner:
             revisions=self.revisions,
             feedback_history=self.feedback_history,
         )
-        answer = await self.backend.acall(text)
+        answer = await self.provider.acall(text)
         self.revisions.append(answer)
         self.feedback_history.append(self.feedback)
         self.answer, self.feedback = answer, None
@@ -80,11 +80,11 @@ def main(argv=None):
             [
                 "Explain which part renders text and which part executes it.",
                 f"Demo revision {turn + 1}: Prompt renders Jinja arguments into text; "
-                "the backend executes that text. Ordinary Python owns state and sequencing.",
+                "the provider executes that text. Ordinary Python owns state and sequencing.",
             ]
         )
-    backend = backend_from_args(args, p, ScriptedBackend(responses))
-    writer = SelfRefiner(args.task, backend, args.criterion or ["Accuracy", "Clarity"])
+    provider = provider_from_args(args, p, ScriptedProvider(responses))
+    writer = SelfRefiner(args.task, provider, args.criterion or ["Accuracy", "Clarity"])
     answer = asyncio.run(writer.run(args.rounds))
     print(answer)
     print(f"Revisions: {len(writer.revisions) - 1}")

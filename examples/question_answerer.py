@@ -4,21 +4,21 @@ import asyncio
 
 from slick import Prompt
 
-from ._cli import ScriptedBackend, backend_from_args, parser
+from ._cli import ScriptedProvider, parser, provider_from_args
 
 
 class QuestionAnswerer:
-    """Own a backend and history; call methods sequentially on each instance."""
+    """Own a provider and history; call methods sequentially on each instance."""
 
-    def __init__(self, backend):
-        self.backend = backend
+    def __init__(self, provider):
+        self.provider = provider
         self.history: list[dict[str, str]] = []
         self.answer_prompt = Prompt("conversation.j2")
         self.critique_prompt = Prompt("critique.j2")
 
     async def ask(self, question: str) -> str:
         text = self.answer_prompt(question=question, messages=self.history)
-        answer = await self.backend.acall(text)
+        answer = await self.provider.acall(text)
         self.history.extend(
             [
                 {"role": "user", "content": question},
@@ -29,7 +29,7 @@ class QuestionAnswerer:
 
     async def critique(self, answer: str) -> str:
         text = self.critique_prompt(answer=answer)
-        return await self.backend.acall(text)
+        return await self.provider.acall(text)
 
 
 def main(argv=None):
@@ -40,8 +40,8 @@ def main(argv=None):
     questions = args.question or ["My name is Ada.", "What is my name?"]
     responses = [f"Demo answer to: {question}" for question in questions]
     responses.append("Demo critique: check the answer against the conversation.")
-    backend = backend_from_args(args, p, ScriptedBackend(responses))
-    qa = QuestionAnswerer(backend)
+    provider = provider_from_args(args, p, ScriptedProvider(responses))
+    qa = QuestionAnswerer(provider)
 
     async def run():
         for question in questions:

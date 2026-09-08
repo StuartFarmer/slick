@@ -1,6 +1,6 @@
 """Sample solutions and vote on normalized final answers.
 
-Repeated real calls do not guarantee diversity: Slick's backend interface does
+Repeated real calls do not guarantee diversity: Slick's provider interface does
 not expose sampling temperature. The offline script supplies varied answers.
 """
 
@@ -11,7 +11,7 @@ from itertools import cycle, islice
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from examples._cli import ScriptedBackend, backend_from_args, parser, positive_int
+from examples._cli import ScriptedProvider, parser, positive_int, provider_from_args
 from slick import Prompt, parse
 
 
@@ -22,9 +22,9 @@ class Solution(BaseModel):
 
 
 class SolutionSampler:
-    def __init__(self, problem: str, backend):
+    def __init__(self, problem: str, provider):
         self.problem = problem
-        self.backend = backend
+        self.provider = provider
         self.samples: list[Solution] = []
         self.votes: Counter[str] = Counter()
         self.sample_prompt = Prompt("self_consistency/sample.j2")
@@ -34,7 +34,7 @@ class SolutionSampler:
             raise ValueError("count must be a positive integer")
         for _ in range(count):
             text = self.sample_prompt(problem=self.problem, schema=Solution.model_json_schema())
-            solution = parse(await self.backend.acall(text), Solution)
+            solution = parse(await self.provider.acall(text), Solution)
             self.samples.append(solution)
         return self.samples
 
@@ -64,10 +64,10 @@ def main(argv=None):
             json.dumps({"answer": "42", "approach": "Add 20, then 5."}),
         ]
     )
-    backend = backend_from_args(
-        args, argument_parser, ScriptedBackend(islice(responses, args.samples))
+    provider = provider_from_args(
+        args, argument_parser, ScriptedProvider(islice(responses, args.samples))
     )
-    sampler = SolutionSampler(args.problem, backend)
+    sampler = SolutionSampler(args.problem, provider)
     result = asyncio.run(sampler.run(args.samples))
     print(result.answer)
     print(f"Votes: {dict(sampler.votes)}")

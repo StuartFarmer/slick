@@ -9,10 +9,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from slick import prompts
-from slick.backends import Anthropic, OpenAI
+from slick.providers import AnthropicAPI, OpenAIAPI
 
 from .agent import CodingAgent
-from .demo import DemoBackend, create_demo
+from .demo import DemoProvider, create_demo
 from .session import load_session, restore_session
 from .state import load_config
 from .workspace import Workspace
@@ -22,11 +22,11 @@ async def deny(request):
     return "deny"
 
 
-async def create_agent(backend, root, config, *, decide, emit, saved=None):
+async def create_agent(provider_instance, root, config, *, decide, emit, saved=None):
     if saved is not None:
         if Path(root).resolve() != Path(saved.root) or config != saved.config:
             raise ValueError("Resume configuration does not match saved session")
-        return await restore_session(saved, backend, decide=decide, emit=emit)
+        return await restore_session(saved, provider_instance, decide=decide, emit=emit)
     workspace = Workspace(
         Path(root),
         checks=config.checks,
@@ -34,14 +34,14 @@ async def create_agent(backend, root, config, *, decide, emit, saved=None):
         command_timeout=config.limits.command_timeout,
     )
     await workspace.initialize()
-    agent = CodingAgent(backend, workspace, config, emit=emit)
+    agent = CodingAgent(provider_instance, workspace, config, emit=emit)
     agent.state.fingerprint = await workspace.fingerprint()
     return agent
 
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=["demo", "openai", "anthropic"])
+    parser.add_argument("--provider", choices=["demo", "openai", "anthropic"])
     parser.add_argument("--model")
     parser.add_argument("--workspace", type=Path)
     parser.add_argument("--config", type=Path)
@@ -69,8 +69,10 @@ def print_event(event):
         print(result["answer"])
 
 
-async def _headless(backend, root, config, task, saved):
-    agent = await create_agent(backend, root, config, decide=deny, emit=print_event, saved=saved)
+async def _headless(provider_instance, root, config, task, saved):
+    agent = await create_agent(
+        provider_instance, root, config, decide=deny, emit=print_event, saved=saved
+    )
     result = await agent.run(task)
     return {"verified": 0, "unverified": 2, "blocked": 2, "failed": 1, "cancelled": 130}[
         result.status
@@ -85,17 +87,17 @@ def _validate_args(parser, args):
     if args.task and not args.headless:
         parser.error("--task requires --headless; use the input box interactively")
     if args.resume:
-        if any([args.backend, args.model, args.workspace, args.config]):
+        if any([args.provider, args.model, args.workspace, args.config]):
             parser.error(
-                "--resume cannot be combined with backend/model/workspace/config overrides"
+                "--resume cannot be combined with provider/model/workspace/config overrides"
             )
         return
-    args.backend = args.backend or "demo"
-    if args.backend == "demo":
+    args.provider = args.provider or "demo"
+    if args.provider == "demo":
         if args.workspace or args.model or args.config:
             parser.error("Demo owns its temporary workspace, model, and check configuration")
     elif not args.model or not args.workspace:
-        parser.error("Real backends require --model and --workspace")
+        parser.error("Real providers require --model and --workspace")
 
 
 def main(argv=None):
@@ -105,7 +107,7 @@ def main(argv=None):
     prompts.TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "prompts"
     try:
         saved = load_session(args.resume) if args.resume else None
-        provider = saved.provider if saved else args.backend
+        provider = saved.provider if saved else args.provider
         model = saved.model if saved else args.model
         context = (
             TemporaryDirectory(prefix="slick-coding-demo-")
@@ -119,13 +121,13 @@ def main(argv=None):
                 if saved
                 else (create_demo(root) if provider == "demo" else load_config(args.config))
             )
-            backend = (
-                DemoBackend(root)
+            provider_instance = (
+                DemoProvider(root)
                 if provider == "demo"
-                else {"openai": OpenAI, "anthropic": Anthropic}[provider](model=model)
+                else {"openai": OpenAIAPI, "anthropic": AnthropicAPI}[provider](model=model)
             )
             if args.headless:
-                return asyncio.run(_headless(backend, root, config, args.task, saved))
+                return asyncio.run(_headless(provider_instance, root, config, args.task, saved))
             try:
                 from .tui import HarnessApp
             except ImportError as error:
@@ -133,7 +135,7 @@ def main(argv=None):
                     "Install the TUI with: python -m pip install -r "
                     "examples/coding_harness/requirements.txt"
                 ) from error
-            return HarnessApp(backend, root, config, saved=saved).run() or 0
+            return HarnessApp(provider_instance, root, config, saved=saved).run() or 0
     except (KeyboardInterrupt, asyncio.CancelledError):
         return 130
     except Exception as error:

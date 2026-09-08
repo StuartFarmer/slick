@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 
 from pydantic import BaseModel, Field, constr
 
-from examples._cli import ScriptedBackend, backend_from_args, parser, positive_int
+from examples._cli import ScriptedProvider, parser, positive_int, provider_from_args
 from slick import Prompt, parse
 
 NonemptyText = constr(strip_whitespace=True, min_length=1)
@@ -39,7 +39,7 @@ class ThoughtState:
 
 class ThoughtSearch:
     def __init__(
-        self, problem: str, backend, max_depth: int = 2, beam_width: int = 2, breadth: int = 2
+        self, problem: str, provider, max_depth: int = 2, beam_width: int = 2, breadth: int = 2
     ):
         for name, value in [
             ("max_depth", max_depth),
@@ -49,7 +49,7 @@ class ThoughtSearch:
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
         self.problem = problem
-        self.backend = backend
+        self.provider = provider
         self.max_depth = max_depth
         self.beam_width = beam_width
         self.breadth = breadth
@@ -72,7 +72,7 @@ class ThoughtSearch:
             breadth=self.breadth,
             schema=Expansion.model_json_schema(),
         )
-        expansion = parse(await self.backend.acall(text), Expansion)
+        expansion = parse(await self.provider.acall(text), Expansion)
         if len(expansion.candidates) > self.breadth:
             raise ValueError("expansion exceeds breadth")
         return [
@@ -87,7 +87,7 @@ class ThoughtSearch:
             criteria=["Satisfies the problem constraints", "Can lead to a correct complete answer"],
             schema=Evaluation.model_json_schema(),
         )
-        evaluation = parse(await self.backend.acall(text), Evaluation)
+        evaluation = parse(await self.provider.acall(text), Evaluation)
         return replace(node, score=evaluation.score)
 
     def select(self, candidates: list[ThoughtState]) -> list[ThoughtState]:
@@ -147,14 +147,14 @@ def main(argv=None):
         "--breadth", type=positive_int, default=2, help="children per state"
     )
     args = argument_parser.parse_args(argv)
-    backend = backend_from_args(
+    provider = provider_from_args(
         args,
         argument_parser,
-        ScriptedBackend(
+        ScriptedProvider(
             demo_responses(args.depth, args.width, args.breadth),
         ),
     )
-    search = ThoughtSearch(args.problem, backend, args.depth, args.width, args.breadth)
+    search = ThoughtSearch(args.problem, provider, args.depth, args.width, args.breadth)
     result = asyncio.run(search.run())
     if result.answer is None:
         print(f"Search stopped without a complete answer. Best partial state: {result.steps}")

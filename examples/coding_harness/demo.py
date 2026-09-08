@@ -63,7 +63,7 @@ def create_demo(root: Path) -> HarnessConfig:
     )
 
 
-class DemoBackend:
+class DemoProvider:
     def __init__(self, root: Path):
         self.root = Path(root)
         self.model = "scripted"

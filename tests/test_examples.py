@@ -14,7 +14,7 @@ def test_summary_history_and_retrieval_examples(monkeypatch, tmp_path):
     monkeypatch.setattr(prompts, "TEMPLATE_ROOT", Path(example.__file__).with_name("prompts"))
     monkeypatch.setattr(prompts, "LOG_DIR", tmp_path / "logs")
 
-    class Backend:
+    class FakeProvider:
         def __init__(self):
             self.inputs = []
 
@@ -26,17 +26,17 @@ def test_summary_history_and_retrieval_examples(monkeypatch, tmp_path):
                 "Use a list of messages.",
             ][len(self.inputs) - 1]
 
-    backend = Backend()
-    results = asyncio.run(example.run(backend))
+    provider = FakeProvider()
+    results = asyncio.run(example.run(provider))
     assert results["summary"].headline == "Jinja to LLM"
     assert results["conversation"] == "Yes, the history is included."
     assert results["retrieval"] == "Use a list of messages."
-    assert len(backend.inputs) == 3
-    assert "# Output Format" in backend.inputs[0]
-    assert "user: My name is Ada." in backend.inputs[1]
-    assert "assistant: Hello, Ada." in backend.inputs[1]
-    assert "History can be supplied as a list of messages." in backend.inputs[2]
-    assert all("Write clearly" in text for text in backend.inputs)
+    assert len(provider.inputs) == 3
+    assert "# Output Format" in provider.inputs[0]
+    assert "user: My name is Ada." in provider.inputs[1]
+    assert "assistant: Hello, Ada." in provider.inputs[1]
+    assert "History can be supplied as a list of messages." in provider.inputs[2]
+    assert all("Write clearly" in text for text in provider.inputs)
     assert not (tmp_path / "logs").exists()
 
 
@@ -44,7 +44,7 @@ def test_question_answerer_owns_history_and_keeps_critique_separate(monkeypatch)
     example = importlib.import_module("examples.question_answerer")
     monkeypatch.setattr(prompts, "TEMPLATE_ROOT", Path(example.__file__).with_name("prompts"))
 
-    class Backend:
+    class FakeProvider:
         def __init__(self):
             self.inputs = []
 
@@ -55,9 +55,9 @@ def test_question_answerer_owns_history_and_keeps_critique_separate(monkeypatch)
             ]
 
     async def run():
-        backend = Backend()
-        qa = example.QuestionAnswerer(backend)
-        other = example.QuestionAnswerer(backend)
+        provider = FakeProvider()
+        qa = example.QuestionAnswerer(provider)
+        other = example.QuestionAnswerer(provider)
         assert await qa.ask("My name is Ada.") == "Hello, Ada."
         answer = await qa.ask("What is my name?")
         history = list(qa.history)
@@ -73,10 +73,10 @@ def test_question_answerer_owns_history_and_keeps_critique_separate(monkeypatch)
             ]
         )
         assert other.history == []
-        assert "user: My name is Ada." in backend.inputs[1]
-        assert "assistant: Hello, Ada." in backend.inputs[1]
-        assert answer in backend.inputs[2]
-        assert "What is my name?" not in backend.inputs[2]
+        assert "user: My name is Ada." in provider.inputs[1]
+        assert "assistant: Hello, Ada." in provider.inputs[1]
+        assert answer in provider.inputs[2]
+        assert "What is my name?" not in provider.inputs[2]
 
     asyncio.run(run())
 
@@ -85,11 +85,11 @@ def test_question_answerer_does_not_record_failed_exchange(monkeypatch):
     example = importlib.import_module("examples.question_answerer")
     monkeypatch.setattr(prompts, "TEMPLATE_ROOT", Path(example.__file__).with_name("prompts"))
 
-    class Backend:
+    class FakeProvider:
         async def acall(self, text):
-            raise RuntimeError("backend unavailable")
+            raise RuntimeError("provider unavailable")
 
-    qa = example.QuestionAnswerer(Backend())
-    with pytest.raises(RuntimeError, match="backend unavailable"):
+    qa = example.QuestionAnswerer(FakeProvider())
+    with pytest.raises(RuntimeError, match="provider unavailable"):
         asyncio.run(qa.ask("Hello"))
     assert qa.history == []

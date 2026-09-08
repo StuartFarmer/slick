@@ -1,4 +1,4 @@
-"""Model tests: the prompt-in/text-out contract every step is built on."""
+"""CLI provider execution, subprocess cleanup, and model selection."""
 
 import asyncio
 import os
@@ -9,22 +9,24 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from slick import models as models_module
-from slick.models import (
-    ClaudeModel,
-    CodexModel,
-    Model,
-    ModelError,
+import pytest
+
+from slick.providers import (
+    ClaudeCLI,
+    CodexCLI,
+    Command,
+    ProviderError,
+    get_command,
     get_default,
-    get_model,
     set_default,
 )
+from slick.providers import _command as command_module
 
 
-class FakeModel(Model):
-    """A Model with the subprocess replaced, so call/execute wiring is testable."""
+class FakeCommand(Command):
+    """A Command with the subprocess replaced, so call/execute wiring is testable."""
 
-    backend = "fake"
+    provider = "fake"
 
     def __init__(self, transcript: str = "report body", **kwargs) -> None:
         super().__init__("fake-cli", **kwargs)
@@ -39,22 +41,73 @@ class FakeModel(Model):
         return self.transcript
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_calls_use_configured_workdir_and_execute_can_override(asynchronous):
+    class AsyncFake(FakeCommand):
+        async def _arun_process(self, command, prompt, *, workdir, label):
+            return self._run_process(command, prompt, workdir=workdir, label=label)
+
+    model = AsyncFake(workdir="/tmp/configured")
+
+    def invoke(method, *args, **kwargs):
+        result = getattr(model, ("a" if asynchronous else "") + method)(*args, **kwargs)
+        return asyncio.run(result) if asynchronous else result
+
+    invoke("call", "first")
+    assert model.runs[-1][2] == Path("/tmp/configured")
+    invoke("execute", "second", workdir="/tmp/override")
+    assert model.runs[-1][2] == Path("/tmp/override")
+    invoke("execute", "third", workdir="")
+    assert model.runs[-1][2] == Path(".")
+    invoke("call", "fourth")
+    assert model.runs[-1][2] == Path("/tmp/configured")
+    plain = AsyncFake()
+    plain.call(prompt="legacy keyword")
+    assert plain.runs[-1][2] is None
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_configured_directory_reaches_the_child_process(tmp_path, asynchronous):
+    model = Subprocess.RealCommand(
+        [sys.executable, "-c", "import os; print(os.getcwd(), end='')"], workdir=tmp_path
+    )
+    result = asyncio.run(model.acall("prompt")) if asynchronous else model.call("prompt")
+    assert Path(result) == tmp_path.resolve()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_codex_relative_workdir_is_not_applied_twice(tmp_path, monkeypatch, asynchronous):
+    workdir = tmp_path / "subdir"
+    workdir.mkdir()
+    script = tmp_path / "codex.py"
+    script.write_text(
+        "import json, os, sys\n"
+        "os.chdir(sys.argv[sys.argv.index('--cd') + 1])\n"
+        "print(json.dumps({'type': 'item.completed', 'item': "
+        "{'type': 'agent_message', 'text': os.getcwd()}}))\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    model = CodexCLI(command=str(script), workdir="subdir")
+    result = asyncio.run(model.acall("prompt")) if asynchronous else model.call("prompt")
+    assert Path(result) == workdir.resolve()
+
+
 class Call(unittest.TestCase):
     def test_returns_the_response_text(self):
-        self.assertEqual(FakeModel().call("analyze this"), "report body")
+        self.assertEqual(FakeCommand().call("analyze this"), "report body")
 
     def test_execute_reports_both_the_final_message_and_the_transcript(self):
-        result = FakeModel().execute("analyze this")
+        result = FakeCommand().execute("analyze this")
         self.assertEqual(result.final_message, "report body")
         self.assertEqual(result.transcript, "report body")
 
     def test_an_empty_workdir_is_normalized_to_the_current_directory(self):
-        model = FakeModel()
+        model = FakeCommand()
         model.execute("prompt", workdir="")
         self.assertEqual(model.runs[0][2], Path("."))
 
     def test_the_prompt_is_fed_to_the_process(self):
-        model = FakeModel()
+        model = FakeCommand()
         model.call("analyze this")
         (_, prompt, _, label) = model.runs[0]
         self.assertEqual(prompt, "analyze this")
@@ -62,15 +115,15 @@ class Call(unittest.TestCase):
 
     def test_an_empty_response_is_returned_as_is(self):
         # Deciding what an empty response means is the caller's job; @prompt
-        # refuses to save one, but Model just reports what it got.
-        self.assertEqual(FakeModel(transcript="").call("analyze this"), "")
+        # refuses to save one, but Command just reports what it got.
+        self.assertEqual(FakeCommand(transcript="").call("analyze this"), "")
 
 
 class Subprocess(unittest.TestCase):
     """The real _run_process, driven through python itself."""
 
-    class RealModel(Model):
-        backend = "real"
+    class RealCommand(Command):
+        provider = "real"
 
         def __init__(self, argv: list[str], **kwargs) -> None:
             super().__init__("python", **kwargs)
@@ -81,22 +134,22 @@ class Subprocess(unittest.TestCase):
 
     def test_stdout_is_captured_and_stdin_is_the_prompt(self):
         echo = "import sys; sys.stdout.write(sys.stdin.read())"
-        model = self.RealModel([sys.executable, "-c", echo])
+        model = self.RealCommand([sys.executable, "-c", echo])
         self.assertEqual(model.call("echoed prompt"), "echoed prompt")
 
     def test_a_nonzero_exit_raises_with_the_detail(self):
-        model = self.RealModel(
+        model = self.RealCommand(
             [sys.executable, "-c", "import sys; sys.stderr.write('boom'); sys.exit(3)"]
         )
-        with self.assertRaises(ModelError) as caught:
+        with self.assertRaises(ProviderError) as caught:
             model.call("analyze this")
         message = str(caught.exception)
         self.assertIn("exit 3", message)
         self.assertIn("boom", message)
 
     def test_a_timeout_raises(self):
-        model = self.RealModel([sys.executable, "-c", "import time; time.sleep(5)"], timeout=1)
-        with self.assertRaises(ModelError) as caught:
+        model = self.RealCommand([sys.executable, "-c", "import time; time.sleep(5)"], timeout=1)
+        with self.assertRaises(ProviderError) as caught:
             model.call("analyze this")
         self.assertIn("timed out", str(caught.exception))
 
@@ -110,7 +163,7 @@ class CodexTranscript(unittest.TestCase):
                 '{"type": "item.completed", "item": {"type": "agent_message", "text": "final"}}',
             ]
         )
-        self.assertEqual(CodexModel()._parse_final(transcript), "final")
+        self.assertEqual(CodexCLI()._parse_final(transcript), "final")
 
     def test_non_json_lines_are_skipped(self):
         transcript = "\n".join(
@@ -119,10 +172,10 @@ class CodexTranscript(unittest.TestCase):
                 '{"type": "item.completed", "item": {"type": "agent_message", "text": "final"}}',
             ]
         )
-        self.assertEqual(CodexModel()._parse_final(transcript), "final")
+        self.assertEqual(CodexCLI()._parse_final(transcript), "final")
 
     def test_a_transcript_with_no_agent_message_yields_empty(self):
-        self.assertEqual(CodexModel()._parse_final("just noise"), "")
+        self.assertEqual(CodexCLI()._parse_final("just noise"), "")
 
 
 class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
@@ -135,9 +188,12 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
             processes.append(process)
             return process
 
-        model = Subprocess.RealModel([sys.executable, "-c", "import sys; sys.stdin.read()"])
+        model = Subprocess.RealCommand([sys.executable, "-c", "import sys; sys.stdin.read()"])
         try:
-            with patch("slick.models.asyncio.create_subprocess_exec", side_effect=record_process):
+            with patch(
+                "slick.providers._command.asyncio.create_subprocess_exec",
+                side_effect=record_process,
+            ):
                 with self.assertRaises(UnicodeEncodeError):
                     await model.acall("\ud800")
             self.assertEqual(processes, [])
@@ -148,13 +204,13 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
                 await process.communicate()
 
     async def test_stdout_is_captured_and_stdin_is_the_prompt(self):
-        model = Subprocess.RealModel(
+        model = Subprocess.RealCommand(
             [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"]
         )
         self.assertEqual(await model.acall("echoed café"), "echoed café")
 
     async def test_execute_preserves_workdir_and_sandbox(self):
-        class AsyncFake(FakeModel):
+        class AsyncFake(FakeCommand):
             async def _arun_process(self, command, prompt, *, workdir, label):
                 return self._run_process(command, prompt, workdir=workdir, label=label)
 
@@ -170,10 +226,10 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(model.runs[-1][2], Path("."))
 
     async def test_a_nonzero_exit_raises_with_the_detail(self):
-        model = Subprocess.RealModel(
+        model = Subprocess.RealCommand(
             [sys.executable, "-c", "import sys; sys.stderr.write('boom'); sys.exit(3)"]
         )
-        with self.assertRaisesRegex(ModelError, r"real failed \(exit 3\): boom"):
+        with self.assertRaisesRegex(ProviderError, r"real failed \(exit 3\): boom"):
             await model.acall("prompt")
 
     async def test_timeout_kills_and_reaps_the_process(self):
@@ -183,8 +239,8 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
                 "import os, pathlib, sys, time; "
                 "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
             )
-            model = Subprocess.RealModel([sys.executable, "-c", code, str(pid_path)], timeout=1)
-            with self.assertRaisesRegex(ModelError, "real timed out after 1s"):
+            model = Subprocess.RealCommand([sys.executable, "-c", code, str(pid_path)], timeout=1)
+            with self.assertRaisesRegex(ProviderError, "real timed out after 1s"):
                 await model.acall("prompt")
             with self.assertRaises(ProcessLookupError):
                 os.kill(int(pid_path.read_text()), 0)
@@ -196,7 +252,7 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
                 "import os, pathlib, sys, time; "
                 "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
             )
-            model = Subprocess.RealModel([sys.executable, "-c", code, str(pid_path)])
+            model = Subprocess.RealCommand([sys.executable, "-c", code, str(pid_path)])
             task = asyncio.create_task(model.acall("prompt"))
             try:
 
@@ -228,7 +284,7 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / "fake_codex.py"
             script.write_text(f"import sys\nsys.stdin.read()\nsys.stdout.write({transcript!r})\n")
-            result = await CodexModel(command=str(script)).aexecute("prompt")
+            result = await CodexCLI(command=str(script)).aexecute("prompt")
         self.assertEqual(result.final_message, "final")
         self.assertEqual(result.transcript, transcript)
 
@@ -241,7 +297,7 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
                 "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
                 "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))"
             )
-            model = Subprocess.RealModel([sys.executable, "-c", code, str(pid_path)])
+            model = Subprocess.RealCommand([sys.executable, "-c", code, str(pid_path)])
             task = asyncio.create_task(model.acall("prompt"))
             try:
 
@@ -268,7 +324,7 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
 
 class Commands(unittest.TestCase):
     def test_codex_passes_workdir_sandbox_and_model(self):
-        command = CodexModel(model="gpt-5")._command(workdir=Path("/tmp/work"), sandbox="read-only")
+        command = CodexCLI(model="gpt-5")._command(workdir=Path("/tmp/work"), sandbox="read-only")
         self.assertIn("--json", command)
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
         self.assertEqual(command[command.index("--cd") + 1], "/tmp/work")
@@ -276,63 +332,63 @@ class Commands(unittest.TestCase):
         self.assertEqual(command[-1], "-")
 
     def test_codex_omits_workdir_and_model_when_unset(self):
-        command = CodexModel()._command(workdir=None, sandbox="read-only")
+        command = CodexCLI()._command(workdir=None, sandbox="read-only")
         self.assertNotIn("--cd", command)
         self.assertNotIn("--model", command)
 
     def test_claude_appends_the_model(self):
-        command = ClaudeModel(model="claude-opus-4-8")._command(workdir=None, sandbox="read-only")
+        command = ClaudeCLI(model="claude-opus-4-8")._command(workdir=None, sandbox="read-only")
         self.assertEqual(command[command.index("--model") + 1], "claude-opus-4-8")
 
-    def test_get_model_selects_the_backend(self):
-        self.assertIsInstance(get_model("codex"), CodexModel)
-        self.assertIsInstance(get_model("claude"), ClaudeModel)
+    def test_get_command_selects_the_provider(self):
+        self.assertIsInstance(get_command("codex"), CodexCLI)
+        self.assertIsInstance(get_command("claude"), ClaudeCLI)
         with self.assertRaises(KeyError):
-            get_model("nope")
+            get_command("nope")
 
 
 class Defaults(unittest.TestCase):
     """Resolution order: argument, then set_default, then env, then built-in."""
 
     def setUp(self) -> None:
-        for name in ("_default_backend", "_default_model"):
-            self.addCleanup(setattr, models_module, name, getattr(models_module, name))
-            setattr(models_module, name, None)
-        for name in ("SLICK_BACKEND", "SLICK_MODEL"):
+        for name in ("_default_provider", "_default_model"):
+            self.addCleanup(setattr, command_module, name, getattr(command_module, name))
+            setattr(command_module, name, None)
+        for name in ("SLICK_PROVIDER", "SLICK_MODEL"):
             self.addCleanup(os.environ.pop, name, None)
             os.environ.pop(name, None)
 
     def test_the_built_in_default_applies_when_nothing_is_set(self):
         self.assertEqual(get_default(), ("codex", None))
-        self.assertIsInstance(get_model(), CodexModel)
+        self.assertIsInstance(get_command(), CodexCLI)
 
-    def test_set_default_is_used_by_a_bare_get_model(self):
-        set_default(backend="claude", model="claude-opus-4-8")
+    def test_set_default_is_used_by_a_bare_get_command(self):
+        set_default(provider="claude", model="claude-opus-4-8")
         self.assertEqual(get_default(), ("claude", "claude-opus-4-8"))
-        model = get_model()
-        self.assertIsInstance(model, ClaudeModel)
+        model = get_command()
+        self.assertIsInstance(model, ClaudeCLI)
         self.assertEqual(model.model, "claude-opus-4-8")
 
     def test_the_environment_applies_when_nothing_was_set_in_process(self):
-        os.environ["SLICK_BACKEND"] = "claude"
+        os.environ["SLICK_PROVIDER"] = "claude"
         os.environ["SLICK_MODEL"] = "claude-haiku-4-5"
         self.assertEqual(get_default(), ("claude", "claude-haiku-4-5"))
 
     def test_set_default_beats_the_environment(self):
-        os.environ["SLICK_BACKEND"] = "claude"
-        set_default(backend="codex")
+        os.environ["SLICK_PROVIDER"] = "claude"
+        set_default(provider="codex")
         self.assertEqual(get_default()[0], "codex")
 
     def test_an_argument_beats_everything(self):
-        os.environ["SLICK_BACKEND"] = "claude"
-        set_default(backend="claude", model="claude-opus-4-8")
-        model = get_model("codex", "gpt-5")
-        self.assertIsInstance(model, CodexModel)
+        os.environ["SLICK_PROVIDER"] = "claude"
+        set_default(provider="claude", model="claude-opus-4-8")
+        model = get_command("codex", "gpt-5")
+        self.assertIsInstance(model, CodexCLI)
         self.assertEqual(model.model, "gpt-5")
 
-    def test_an_unknown_default_backend_is_rejected_where_it_is_set(self):
+    def test_an_unknown_default_provider_is_rejected_where_it_is_set(self):
         with self.assertRaises(KeyError):
-            set_default(backend="nope")
+            set_default(provider="nope")
 
 
 if __name__ == "__main__":

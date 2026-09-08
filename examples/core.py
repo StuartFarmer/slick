@@ -1,4 +1,4 @@
-"""Run offline: python -m examples.core. Pass an API/CLI backend to run() for real calls."""
+"""Run offline: python -m examples.core. Pass an API/CLI provider to run() for real calls."""
 
 import asyncio
 from pathlib import Path
@@ -23,16 +23,16 @@ async def search_documents(query: str) -> list[str]:
     return [document for document in documents if any(t in document.lower() for t in terms)]
 
 
-async def run(backend) -> dict:
-    @prompt(backend=backend, template="summary.j2")
+async def run(provider) -> dict:
+    @prompt(provider=provider, template="summary.j2")
     async def summarize(document: str) -> Summary:
         """Summarize a document into a headline and points."""
 
-    @prompt(backend=backend, template="conversation.j2")
+    @prompt(provider=provider, template="conversation.j2")
     async def reply(question: str, messages: list[dict]) -> str:
         """Answer using the supplied history."""
 
-    summary = await summarize("Slick renders Jinja, calls a backend, and parses the result.")
+    summary = await summarize("Slick renders Jinja, calls a provider, and parses the result.")
     history = [
         {"role": "user", "content": "My name is Ada."},
         {"role": "assistant", "content": "Hello, Ada."},
@@ -42,11 +42,11 @@ async def run(backend) -> dict:
     question = "How can I supply history?"
     documents = await search_documents(question)
     text = render("answer.j2", question=question, documents=documents)
-    retrieval = await backend.acall(text)
+    retrieval = await provider.acall(text)
     return {"summary": summary, "conversation": conversation, "retrieval": retrieval}
 
 
-class DemoBackend:
+class DemoProvider:
     """Fixed responses to demonstrate the complete pipeline without credentials."""
 
     def __init__(self):
@@ -64,5 +64,5 @@ class DemoBackend:
 
 if __name__ == "__main__":
     prompts.TEMPLATE_ROOT = Path(__file__).with_name("prompts")
-    for name, result in asyncio.run(run(DemoBackend())).items():
+    for name, result in asyncio.run(run(DemoProvider())).items():
         print(f"{name}: {result}")

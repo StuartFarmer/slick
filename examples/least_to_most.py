@@ -5,7 +5,7 @@ import json
 
 from pydantic import BaseModel, Field, constr
 
-from examples._cli import ScriptedBackend, backend_from_args, parser, positive_int
+from examples._cli import ScriptedProvider, parser, positive_int, provider_from_args
 from slick import Prompt, parse
 
 NonemptyText = constr(strip_whitespace=True, min_length=1)
@@ -20,11 +20,11 @@ class Answer(BaseModel):
 
 
 class LeastToMost:
-    def __init__(self, problem: str, backend, max_subproblems: int = 4):
+    def __init__(self, problem: str, provider, max_subproblems: int = 4):
         if type(max_subproblems) is not int or max_subproblems < 1:
             raise ValueError("max_subproblems must be a positive integer")
         self.problem = problem
-        self.backend = backend
+        self.provider = provider
         self.max_subproblems = max_subproblems
         self.subproblems: list[str] = []
         self.solutions: list[dict[str, str]] = []
@@ -38,7 +38,7 @@ class LeastToMost:
             limit=self.max_subproblems,
             schema=Decomposition.model_json_schema(),
         )
-        plan = parse(await self.backend.acall(text), Decomposition)
+        plan = parse(await self.provider.acall(text), Decomposition)
         if len(plan.subproblems) > self.max_subproblems:
             raise ValueError("decomposition exceeds max_subproblems")
         self.subproblems = plan.subproblems
@@ -59,7 +59,7 @@ class LeastToMost:
             solutions=self.solutions,
             schema=Answer.model_json_schema(),
         )
-        result = parse(await self.backend.acall(text), Answer)
+        result = parse(await self.provider.acall(text), Answer)
         self.solutions.append({"input": question, "output": result.answer})
         if index == len(self.subproblems):
             self.answer = result.answer
@@ -79,10 +79,10 @@ def main(argv=None):
     )
     argument_parser.add_argument("--max-subproblems", type=positive_int, default=4)
     args = argument_parser.parse_args(argv)
-    backend = backend_from_args(
+    provider = provider_from_args(
         args,
         argument_parser,
-        ScriptedBackend(
+        ScriptedProvider(
             [
                 json.dumps({"subproblems": ["How many apples are in three boxes of 4?"]}),
                 json.dumps({"answer": "12 apples"}),
@@ -90,7 +90,7 @@ def main(argv=None):
             ]
         ),
     )
-    solver = LeastToMost(args.problem, backend, args.max_subproblems)
+    solver = LeastToMost(args.problem, provider, args.max_subproblems)
     print(asyncio.run(solver.run()))
 
 

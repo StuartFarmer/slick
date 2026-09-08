@@ -4,7 +4,7 @@ An ordinary `CodingAgent` class combines Jinja instructions, native model turns,
 bound Python tools, workspace state, and a bounded verification/repair loop.
 The same agent runs in a simple Textual TUI or headlessly. All application code
 and templates live under `examples/`; the installed Slick package supplies only
-the renderer, callable tools, and backend transport.
+the renderer, callable tools, and provider transport.
 
 ## Run the offline demo
 
@@ -27,7 +27,7 @@ The temporary repository is removed when the application exits.
 Headless mode needs no Textual installation:
 
 ```bash
-python -m examples.coding_harness --backend demo --headless --task 'Fix the total calculation'
+python -m examples.coding_harness --provider demo --headless --task 'Fix the total calculation'
 ```
 
 ## Use a model
@@ -38,8 +38,8 @@ native function tools; real runs make multiple model requests.
 
 ```bash
 python -m pip install -e '.[api]'
-python -m examples.coding_harness --backend openai --model YOUR_MODEL_ID --workspace /absolute/repo --config /absolute/checks.json
-python -m examples.coding_harness --backend anthropic --model YOUR_MODEL_ID --workspace /absolute/repo --config /absolute/checks.json
+python -m examples.coding_harness --provider openai --model YOUR_MODEL_ID --workspace /absolute/repo --config /absolute/checks.json
+python -m examples.coding_harness --provider anthropic --model YOUR_MODEL_ID --workspace /absolute/repo --config /absolute/checks.json
 ```
 
 `--workspace` must identify the exact root of a Git worktree. Existing staged,
@@ -182,8 +182,8 @@ Edit the Jinja files to change instructions. Add a skill template to the explici
 `SKILLS` mapping to make it selectable. Retrieval, memory, extra application methods
 and alternate verification are ordinary Python changes here.
 
-Core `OpenAI.aturn` and `Anthropic.aturn` perform one native request. This app owns
-the loop and history. CLI harness backends, OpenRouter, parallel tools, durable
+Core `OpenAIAPI.aturn` and `AnthropicAPI.aturn` perform one native request. This app owns
+the loop and history. CLI harness providers, OpenRouter, parallel tools, durable
 execution, multimodal inputs and hosted/server tools are outside this example.
 
 ## Tests

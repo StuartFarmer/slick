@@ -10,9 +10,9 @@ from types import SimpleNamespace as NS
 import pytest
 
 
-def backend_class(provider):
-    module = importlib.import_module("slick.backends")
-    return getattr(module, provider)
+def provider_class(provider):
+    module = importlib.import_module("slick.providers")
+    return getattr(module, provider + "API")
 
 
 def response(provider, text="  answer\n"):
@@ -63,8 +63,12 @@ class Client:
         self.__exit__(*args)
 
 
-def invoke(backend, asynchronous):
-    return asyncio.run(backend.acall("input\n")) if asynchronous else backend.call("input\n")
+def invoke(provider_instance, asynchronous):
+    return (
+        asyncio.run(provider_instance.acall("input\n"))
+        if asynchronous
+        else provider_instance.call("input\n")
+    )
 
 
 @pytest.mark.parametrize("provider", ["OpenAI", "Anthropic"])
@@ -87,11 +91,11 @@ def test_requests_return_exact_text_and_respect_client_ownership(
     else:
         client = factory()
         injected = {"async_client" if asynchronous else "client": client}
-    backend = backend_class(provider)(
+    provider_instance = provider_class(provider)(
         "explicit-model", timeout=12.5, max_output_tokens=123, max_retries=1, **injected
     )
-    assert invoke(backend, asynchronous) == "  answer\n"
-    assert invoke(backend, asynchronous) == "  answer\n"
+    assert invoke(provider_instance, asynchronous) == "  answer\n"
+    assert invoke(provider_instance, asynchronous) == "  answer\n"
     expected = {"model": "explicit-model"}
     if provider == "OpenAI":
         expected.update(input="input\n", max_output_tokens=123, store=False)
@@ -114,7 +118,7 @@ def test_requests_return_exact_text_and_respect_client_ownership(
 def test_sdk_errors_keep_native_cause_and_owned_clients_close(
     provider, asynchronous, owned, monkeypatch
 ):
-    from slick.models import ModelError
+    from slick.providers import ProviderError
 
     native_error = RuntimeError("provider failed")
     client = Client(native_error, asynchronous=asynchronous)
@@ -124,8 +128,8 @@ def test_sdk_errors_keep_native_cause_and_owned_clients_close(
         injected = {}
     else:
         injected = {"async_client" if asynchronous else "client": client}
-    with pytest.raises(ModelError) as caught:
-        invoke(backend_class(provider)("model", **injected), asynchronous)
+    with pytest.raises(ProviderError) as caught:
+        invoke(provider_class(provider)("model", **injected), asynchronous)
     assert caught.value.__cause__ is native_error
     assert client.state["closed"] == int(owned)
 
@@ -143,7 +147,7 @@ def test_cancellation_propagates_and_closes_owned_client(provider, monkeypatch):
         ),
     )
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(backend_class(provider)("model").acall("input"))
+        asyncio.run(provider_class(provider)("model").acall("input"))
     assert client.state["closed"] == 1
 
 
@@ -186,25 +190,25 @@ BAD_RESPONSES = [
 @pytest.mark.parametrize("provider,reply", BAD_RESPONSES)
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_refused_incomplete_or_nontext_outputs_are_errors(provider, reply, asynchronous):
-    from slick.models import ModelError
+    from slick.providers import ProviderError
 
     client = Client(reply, asynchronous=asynchronous)
-    backend = backend_class(provider)(
+    provider_instance = provider_class(provider)(
         "model", **{"async_client" if asynchronous else "client": client}
     )
-    with pytest.raises(ModelError):
-        invoke(backend, asynchronous)
+    with pytest.raises(ProviderError):
+        invoke(provider_instance, asynchronous)
 
 
 @pytest.mark.parametrize("provider", ["OpenAI", "Anthropic"])
 def test_empty_text_is_preserved_and_multiple_blocks_are_joined(provider):
     reply = response(provider, "")
-    backend = backend_class(provider)("model", client=Client(reply))
-    assert backend.call("input") == ""
+    provider_instance = provider_class(provider)("model", client=Client(reply))
+    assert provider_instance.call("input") == ""
     blocks = reply.output[-1].content if provider == "OpenAI" else reply.content
     kind = "output_text" if provider == "OpenAI" else "text"
     blocks.extend([NS(type=kind, text=" left "), NS(type=kind, text="right\n")])
-    assert backend.call("input") == " left right\n"
+    assert provider_instance.call("input") == " left right\n"
 
 
 @pytest.mark.parametrize("provider", ["OpenAI", "Anthropic"])
@@ -230,13 +234,13 @@ def test_empty_text_is_preserved_and_multiple_blocks_are_joined(provider):
 )
 def test_invalid_configuration_rejected_at_construction(provider, options):
     with pytest.raises((TypeError, ValueError)):
-        backend_class(provider)(**{"model": "model", **options})
+        provider_class(provider)(**{"model": "model", **options})
 
 
 @pytest.mark.parametrize("provider", ["OpenAI", "Anthropic"])
 def test_identity_is_json_configuration_without_client_credentials(provider):
-    backend = backend_class(provider)("explicit-model", client=NS(api_key="secret"))
-    assert json.loads(json.dumps(backend.identity())) == {
+    provider_instance = provider_class(provider)("explicit-model", client=NS(api_key="secret"))
+    assert json.loads(json.dumps(provider_instance.identity())) == {
         "provider": provider.lower(),
         "model": "explicit-model",
         "timeout": 60,
@@ -250,13 +254,13 @@ def test_identity_is_json_configuration_without_client_credentials(provider):
 def test_sdk_imports_are_lazy_and_missing_extra_has_actionable_error(
     provider, asynchronous, monkeypatch
 ):
-    from slick.models import ModelError
+    from slick.providers import ProviderError
 
-    # Missing SDKs must not prevent constructing a backend or importing slick.
+    # Missing SDKs must not prevent constructing a provider or importing slick.
     monkeypatch.setitem(sys.modules, provider.lower(), None)
-    backend = backend_class(provider)("model")
-    with pytest.raises(ModelError, match=rf"slick-ai\[{provider.lower()}\]") as caught:
-        invoke(backend, asynchronous)
+    provider_instance = provider_class(provider)("model")
+    with pytest.raises(ProviderError, match=rf"slick-ai\[{provider.lower()}\]") as caught:
+        invoke(provider_instance, asynchronous)
     assert isinstance(caught.value.__cause__, ImportError)
 
 
@@ -271,5 +275,5 @@ def test_importing_slick_does_not_import_optional_sdks(monkeypatch):
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", guarded)
-    importlib.reload(importlib.import_module("slick.backends"))
+    importlib.reload(importlib.import_module("slick.providers"))
     assert attempted == []

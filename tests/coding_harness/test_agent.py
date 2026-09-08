@@ -41,21 +41,21 @@ def test_model_cannot_declare_unchecked_work_verified(workspace):
 
 
 def test_unknown_and_invalid_tools_do_not_execute(workspace):
-    backend = Script(
+    provider = Script(
         turn(
             calls=[ToolCall("a", "missing", {}), ToolCall("b", "create_file", {"path": "bad.py"})]
         ),
         turn("Done"),
     )
-    agent = CodingAgent(backend, workspace, HarnessConfig())
+    agent = CodingAgent(provider, workspace, HarnessConfig())
     asyncio.run(agent.run("Read"))
-    results = [item for item in backend.requests[1] if isinstance(item, ToolResult)]
+    results = [item for item in provider.requests[1] if isinstance(item, ToolResult)]
     assert len(results) == 2 and all(item.is_error for item in results)
     assert not (workspace.root / "bad.py").exists()
 
 
 def test_budget_closes_call_group_without_extra_effects(workspace):
-    backend = Script(
+    provider = Script(
         turn(
             calls=[
                 ToolCall("a", "create_file", {"path": "a.py", "content": "1"}),
@@ -64,7 +64,7 @@ def test_budget_closes_call_group_without_extra_effects(workspace):
         )
     )
     config = HarnessConfig(limits=Limits(max_tool_calls=1))
-    agent = CodingAgent(backend, workspace, config)
+    agent = CodingAgent(provider, workspace, config)
     result = asyncio.run(agent.run("Create files"))
     assert result.status == "blocked"
     assert (workspace.root / "a.py").exists()
@@ -75,8 +75,8 @@ def test_budget_closes_call_group_without_extra_effects(workspace):
 
 
 def test_request_failure_does_not_fabricate_turn_and_can_continue(workspace):
-    backend = Script(RuntimeError("offline transport failed"), turn("Recovered"))
-    agent = CodingAgent(backend, workspace, HarnessConfig())
+    provider = Script(RuntimeError("offline transport failed"), turn("Recovered"))
+    agent = CodingAgent(provider, workspace, HarnessConfig())
     first = asyncio.run(agent.run("Fix"))
     assert first.status == "failed"
     assert not any(isinstance(item, ModelTurn) for item in agent.state.history)
@@ -108,11 +108,11 @@ def test_cancelled_api_records_status_and_rejects_overlapping_run(workspace):
 
 
 def test_reused_call_id_stops_before_second_effect(workspace):
-    backend = Script(
+    provider = Script(
         turn(calls=[ToolCall("same", "create_file", {"path": "a.py", "content": "1"})]),
         turn(calls=[ToolCall("same", "create_file", {"path": "b.py", "content": "2"})]),
     )
-    agent = CodingAgent(backend, workspace, HarnessConfig())
+    agent = CodingAgent(provider, workspace, HarnessConfig())
     result = asyncio.run(agent.run("Create"))
     assert result.status == "failed" and "duplicate" in result.answer
     assert (workspace.root / "a.py").exists()
@@ -120,11 +120,11 @@ def test_reused_call_id_stops_before_second_effect(workspace):
 
 
 def test_request_budget_prevents_next_request(workspace):
-    backend = Script(turn(calls=[ToolCall("read", "read_file", {"path": "sample.py"})]))
-    agent = CodingAgent(backend, workspace, HarnessConfig(limits=Limits(max_turns=1)))
+    provider = Script(turn(calls=[ToolCall("read", "read_file", {"path": "sample.py"})]))
+    agent = CodingAgent(provider, workspace, HarnessConfig(limits=Limits(max_turns=1)))
     result = asyncio.run(agent.run("Inspect"))
     assert result.status == "blocked" and result.turns == 1
-    assert len(backend.requests) == 1
+    assert len(provider.requests) == 1
 
 
 def test_task_deadline_stops_waiting_request(workspace):
@@ -145,12 +145,12 @@ def test_serialization_failure_after_effect_is_not_retried(workspace):
             stream.write("effect\n")
         return "invalid"
 
-    backend = Script(turn(calls=[ToolCall("write", "broken_return", {})]), turn("Stopped"))
-    agent = CodingAgent(backend, workspace, HarnessConfig())
+    provider = Script(turn(calls=[ToolCall("write", "broken_return", {})]), turn("Stopped"))
+    agent = CodingAgent(provider, workspace, HarnessConfig())
     agent.tools = prepare_tools([broken_return])
     asyncio.run(agent.run("Write once"))
     assert (workspace.root / "effects.txt").read_text() == "effect\n"
-    result = next(item for item in backend.requests[1] if isinstance(item, ToolResult))
+    result = next(item for item in provider.requests[1] if isinstance(item, ToolResult))
     assert result.is_error and "effects may have occurred" in result.content
 
 
@@ -165,7 +165,7 @@ def test_cancellation_completes_multicall_history_without_later_effect(workspace
             await asyncio.Event().wait()
             return "done"
 
-        backend = Script(
+        provider = Script(
             turn(
                 calls=[
                     ToolCall("first", "slow_write", {}),
@@ -173,7 +173,7 @@ def test_cancellation_completes_multicall_history_without_later_effect(workspace
                 ]
             )
         )
-        agent = CodingAgent(backend, workspace, HarnessConfig())
+        agent = CodingAgent(provider, workspace, HarnessConfig())
         agent.tools.update(prepare_tools([slow_write]))
         task = asyncio.create_task(agent.run("Write"))
         await asyncio.wait_for(started.wait(), 2)
@@ -201,14 +201,14 @@ def test_failed_checks_stop_at_no_progress_or_repair_budget(workspace, change):
             turn(calls=[ToolCall("edit", "create_file", {"path": "new.py", "content": "1"})])
         )
     responses.append(turn("Second attempt"))
-    backend = Script(*responses)
+    provider = Script(*responses)
     agent = CodingAgent(
-        backend, workspace, HarnessConfig(checks=[check], limits=Limits(max_repairs=1))
+        provider, workspace, HarnessConfig(checks=[check], limits=Limits(max_repairs=1))
     )
     result = asyncio.run(agent.run("Fix"))
     assert result.status == "blocked" and result.repairs == 1
     assert ("Repair budget" if change else "without workspace progress") in result.answer
-    assert not backend.responses
+    assert not provider.responses
 
 
 def test_changes_after_checks_cannot_be_published_as_verified(workspace):
@@ -231,11 +231,11 @@ def test_changes_after_checks_cannot_be_published_as_verified(workspace):
 
 
 def test_modified_verification_files_are_prominent(workspace):
-    backend = Script(
+    provider = Script(
         turn(calls=[ToolCall("test", "create_file", {"path": "test_new.py", "content": "pass"})]),
         turn("Done"),
     )
-    result = asyncio.run(CodingAgent(backend, workspace, HarnessConfig()).run("Add test"))
+    result = asyncio.run(CodingAgent(provider, workspace, HarnessConfig()).run("Add test"))
     assert "Verification-related files changed: test_new.py" in result.answer
 
 
@@ -245,7 +245,7 @@ def test_configured_check_script_changes_are_prominent(workspace):
     check = Check(name="behavior", argv=[sys.executable, "check_behavior.py"])
     workspace.allowed_commands.add((str(workspace.root), tuple(check.argv)))
     source = workspace.read_file("check_behavior.py")
-    backend = Script(
+    provider = Script(
         turn(
             calls=[
                 ToolCall(
@@ -262,7 +262,7 @@ def test_configured_check_script_changes_are_prominent(workspace):
         ),
         turn("Done"),
     )
-    agent = CodingAgent(backend, workspace, HarnessConfig(checks=[check]))
+    agent = CodingAgent(provider, workspace, HarnessConfig(checks=[check]))
     result = asyncio.run(agent.run("Change check"))
     assert result.status == "verified"
     assert "Verification-related files changed: check_behavior.py" in result.answer

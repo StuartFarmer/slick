@@ -1,6 +1,6 @@
 # Runnable patterns
 
-These are ordinary Python application classes using Slick's `Prompt`, backend
+These are ordinary Python application classes using Slick's `Prompt`, provider
 `acall`, and `parse`. Each class owns its state and methods. Sequencing, retrieval,
 tool execution, voting, and search are Python code you can change directly.
 All templates live here in `examples/prompts/`; none are part of the Slick package.
@@ -10,7 +10,7 @@ example independently:
 
 | Example | Command | Object and operations |
 | --- | --- | --- |
-| Shared context primitives | `python -m examples.primitives` | Render all seven parts without a backend |
+| Shared context primitives | `python -m examples.primitives` | Render all seven parts without a provider |
 | Conversation | `python -m examples.question_answerer --critique` | `QuestionAnswerer.ask`, `critique`; instance-owned history |
 | Few-shot | `python -m examples.few_shot` | `FewShotAnswerer.ask`; classify using input/output examples |
 | Chain-of-thought | `python -m examples.chain_of_thought` | `ReasoningSolver.solve`; worked examples and a concise, checkable explanation |
@@ -22,7 +22,7 @@ example independently:
 | Reflexion | `python -m examples.reflexion --attempts 3` | `ReflectiveSolver.attempt`, `evaluate`, `reflect`, `run`; checker feedback and retained lessons |
 | Tree of Thoughts | `python -m examples.tree_of_thoughts --depth 2 --width 2 --breadth 2` | `ThoughtSearch.expand`, `evaluate`, `select`, `run`; bounded beam search |
 
-The default `--backend demo` uses canned responses and requires no credentials.
+The default `--provider demo` uses canned responses and requires no credentials.
 Templates, validation, state changes, tool execution, and loops still run. Canned
 answers demonstrate the default tasks; changing the task does not make the demo
 responses intelligent. Use `--help` on each module to see its input and budget flags.
@@ -44,28 +44,28 @@ The second command installs the optional Textual interface. The harness has its 
 CLI options, sessions and explicit check configuration; it supports OpenAI Responses
 and Anthropic Messages for real calls. Its prompts remain under `examples/prompts/`.
 
-## Use a real backend
+## Use a real provider
 
-Every pattern command accepts `--backend`, `--model`, and `--timeout` (seconds per
+Every pattern command accepts `--provider`, `--model`, and `--timeout` (seconds per
 call). The primitives command only renders text. For API calls, install the
 optional SDKs and set the corresponding `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`:
 
 ```bash
 pip install -e '.[api]'
-python -m examples.self_refine --backend openai --model YOUR_MODEL_ID --task "Explain DNS"
-python -m examples.rag --backend anthropic --model YOUR_MODEL_ID --question "How do templates compose?"
+python -m examples.self_refine --provider openai --model YOUR_MODEL_ID --task "Explain DNS"
+python -m examples.rag --provider anthropic --model YOUR_MODEL_ID --question "How do templates compose?"
 ```
 
 API model IDs are required. CLI harnesses use their installed executable and
 authentication, with an optional model override:
 
 ```bash
-python -m examples.question_answerer --backend codex --question "Explain DNS"
-python -m examples.self_refine --backend claude --task "Explain DNS" --rounds 1
+python -m examples.question_answerer --provider codex --question "Explain DNS"
+python -m examples.self_refine --provider claude --task "Explain DNS" --rounds 1
 ```
 
 These options make real calls. Multi-step patterns make multiple calls; loop
-budgets belong to the example, while the timeout applies to each backend call.
+budgets belong to the example, while the timeout applies to each provider call.
 Structured examples put their JSON schema in the prompt and validate responses
 locally with `parse`.
 
@@ -82,13 +82,13 @@ from slick import prompts
 from examples.self_refine import SelfRefiner
 
 prompts.TEMPLATE_ROOT = Path("examples/prompts")
-writer = SelfRefiner("Explain DNS", backend, ["Accuracy", "Clarity"])
+writer = SelfRefiner("Explain DNS", provider, ["Accuracy", "Clarity"])
 draft = await writer.draft()
 feedback = await writer.critique()
 answer = await writer.revise()
 ```
 
-Here `backend` is any object with `async acall(text) -> str`. A prompt stores only
+Here `provider` is any object with `async acall(text) -> str`. A prompt stores only
 its template filename; the class decides when to render and execute it. Instances
 are intended for sequential use, and their state stays in memory. A new CLI
 invocation starts a new instance.
@@ -147,7 +147,7 @@ change `evaluate` to support a different problem. Lessons feed subsequent attemp
 as template data. Self-Refine uses model feedback instead of an independent checker.
 
 Tree of Thoughts expands partial states, scores them, and retains a bounded beam.
-Scores come from the backend, so a reported complete answer is not independently
+Scores come from the provider, so a reported complete answer is not independently
 verified. ReAct and Reflexion exit with status 1 when their budgets are exhausted;
 Tree of Thoughts does so when it has only a partial state at cutoff. Invalid
 structured responses raise validation errors; these examples do not add retries.

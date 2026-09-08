@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from slick import Prompt, parse
 
-from ._cli import ScriptedBackend, backend_from_args, parser
+from ._cli import ScriptedProvider, parser, provider_from_args
 
 
 class Solution(BaseModel):
@@ -15,8 +15,8 @@ class Solution(BaseModel):
 
 
 class ReasoningSolver:
-    def __init__(self, backend):
-        self.backend = backend
+    def __init__(self, provider):
+        self.provider = provider
         self.prompt = Prompt("chain_of_thought/solve.j2")
         self.solution = None
         self.demonstrations = [
@@ -32,7 +32,7 @@ class ReasoningSolver:
             demonstrations=self.demonstrations,
             schema=Solution.model_json_schema(),
         )
-        solution = parse(await self.backend.acall(text), Solution)
+        solution = parse(await self.provider.acall(text), Solution)
         self.solution = solution
         return solution
 
@@ -43,12 +43,14 @@ def main(argv=None):
         "--question", default="Five bags have six apples each. Four are eaten. How many remain?"
     )
     args = p.parse_args(argv)
-    backend = backend_from_args(
+    provider = provider_from_args(
         args,
         p,
-        ScriptedBackend(['{"explanation":"5 times 6 is 30; subtract 4 to get 26.","answer":"26"}']),
+        ScriptedProvider(
+            ['{"explanation":"5 times 6 is 30; subtract 4 to get 26.","answer":"26"}']
+        ),
     )
-    print(asyncio.run(ReasoningSolver(backend).solve(args.question)).model_dump_json(indent=2))
+    print(asyncio.run(ReasoningSolver(provider).solve(args.question)).model_dump_json(indent=2))
 
 
 if __name__ == "__main__":

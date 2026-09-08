@@ -2,19 +2,109 @@
 
 import asyncio
 import json
+import socket
+import sys
 
 import pytest
 
-from slick.backends import Anthropic, OpenAI
+from slick.providers import AnthropicAPI, OpenAIAPI
 
 httpx = pytest.importorskip("httpx")
+
+
+@pytest.mark.skipif(sys.version_info >= (3, 15), reason="LiteLLM Python range")
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("finish_reason", ["stop", "length", "rate_limit"])
+def test_litellm_real_sdk_uses_offline_transport(monkeypatch, asynchronous, finish_reason):
+    from slick.providers import LiteLLMGateway, ProviderError
+
+    blocked = []
+
+    def no_network(*args, **kwargs):
+        blocked.append(True)
+        raise AssertionError("unexpected external network access")
+
+    monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    monkeypatch.setattr(socket.socket, "connect", no_network)
+    monkeypatch.setattr(socket, "getaddrinfo", no_network)
+    sdk = pytest.importorskip("litellm")
+    monkeypatch.setattr(sdk, "telemetry", False)
+    # Isolate SDK-owned client caching between transports/event loops.
+    monkeypatch.setattr(sdk, "in_memory_llm_clients_cache", type(sdk.in_memory_llm_clients_cache)())
+    requests = []
+    reply = {
+        "id": "chatcmpl-offline",
+        "object": "chat.completion",
+        "created": 1700000000,
+        "model": "private-model",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": finish_reason,
+                "message": {
+                    "role": "assistant",
+                    "content": "  answer\n",
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+    }
+
+    def respond(request):
+        requests.append(request)
+        if finish_reason == "rate_limit":
+            return httpx.Response(
+                429,
+                json={"error": {"message": "offline rate limit", "type": "rate_limit_error"}},
+                headers={"retry-after": "0"},
+            )
+        return httpx.Response(200, json=reply)
+
+    provider_instance = LiteLLMGateway(
+        "openai/private-model",
+        api_base="http://offline.test/v1",
+        api_key="offline",
+        timeout=12.5,
+    )
+
+    transport = httpx.MockTransport(respond)
+    if asynchronous:
+
+        async def run():
+            async with httpx.AsyncClient(transport=transport) as http_client:
+                monkeypatch.setattr(sdk, "aclient_session", http_client)
+                if finish_reason == "stop":
+                    assert await provider_instance.acall("prompt\n") == "  answer\n"
+                else:
+                    with pytest.raises(ProviderError):
+                        await provider_instance.acall("prompt\n")
+                assert not http_client.is_closed
+
+        asyncio.run(run())
+    else:
+        with httpx.Client(transport=transport) as http_client:
+            monkeypatch.setattr(sdk, "client_session", http_client)
+            if finish_reason == "stop":
+                assert provider_instance.call("prompt\n") == "  answer\n"
+            else:
+                with pytest.raises(ProviderError):
+                    provider_instance.call("prompt\n")
+            assert not http_client.is_closed
+
+    assert len(requests) == 1
+    assert requests[0].url == "http://offline.test/v1/chat/completions"
+    body = json.loads(requests[0].content)
+    assert body["model"] == "private-model"
+    assert body["messages"] == [{"role": "user", "content": "prompt\n"}]
+    assert requests[0].extensions["timeout"]["read"] == 12.5
+    assert not blocked
 
 
 CASES = [
     (
         "openai",
         "OpenAI",
-        OpenAI,
+        OpenAIAPI,
         "/v1/responses",
         {"model": "test-model", "input": "prompt\n", "max_output_tokens": 123, "store": False},
         {
@@ -53,7 +143,7 @@ CASES = [
     (
         "anthropic",
         "Anthropic",
-        Anthropic,
+        AnthropicAPI,
         "/v1/messages",
         {
             "model": "test-model",
@@ -74,10 +164,10 @@ CASES = [
 ]
 
 
-@pytest.mark.parametrize("provider,sdk_class,backend_class,path,body,reply", CASES)
+@pytest.mark.parametrize("provider,sdk_class,provider_class,path,body,reply", CASES)
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_real_sdk_request_and_response_leave_injected_transport_open(
-    provider, sdk_class, backend_class, path, body, reply, asynchronous
+    provider, sdk_class, provider_class, path, body, reply, asynchronous
 ):
     sdk = pytest.importorskip(provider)
     requests = []
@@ -95,8 +185,8 @@ def test_real_sdk_request_and_response_leave_injected_transport_open(
                 client = getattr(sdk, "Async" + sdk_class)(
                     api_key="offline-test-key", http_client=http_client
                 )
-                backend = backend_class("test-model", async_client=client, **options)
-                assert await backend.acall("prompt\n") == "  answer\n"
+                provider_instance = provider_class("test-model", async_client=client, **options)
+                assert await provider_instance.acall("prompt\n") == "  answer\n"
                 assert not http_client.is_closed
                 assert not client.is_closed()
 
@@ -104,8 +194,8 @@ def test_real_sdk_request_and_response_leave_injected_transport_open(
     else:
         with httpx.Client(transport=transport) as http_client:
             client = getattr(sdk, sdk_class)(api_key="offline-test-key", http_client=http_client)
-            backend = backend_class("test-model", client=client, **options)
-            assert backend.call("prompt\n") == "  answer\n"
+            provider_instance = provider_class("test-model", client=client, **options)
+            assert provider_instance.call("prompt\n") == "  answer\n"
             assert not http_client.is_closed
             assert not client.is_closed()
 
@@ -116,9 +206,9 @@ def test_real_sdk_request_and_response_leave_injected_transport_open(
     assert requests[0].extensions["timeout"]["read"] == 12.5
 
 
-@pytest.mark.parametrize("provider,sdk_class,backend_class,path,body,reply", CASES)
+@pytest.mark.parametrize("provider,sdk_class,provider_class,path,body,reply", CASES)
 def test_real_sdk_native_turns_replay_original_call_and_correlated_result(
-    provider, sdk_class, backend_class, path, body, reply
+    provider, sdk_class, provider_class, path, body, reply
 ):
     from copy import deepcopy
 
@@ -152,17 +242,17 @@ def test_real_sdk_native_turns_replay_original_call_and_correlated_result(
 
     def read(key: str) -> str:
         """Read a document."""
-        raise AssertionError("backend executed a tool")
+        raise AssertionError("provider executed a tool")
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
             client = getattr(sdk, "Async" + sdk_class)(api_key="offline", http_client=http_client)
-            backend = backend_class("test-model", async_client=client, timeout=12.5)
+            provider_instance = provider_class("test-model", async_client=client, timeout=12.5)
             history = [UserMessage("read intro")]
-            turn = await backend.aturn(history, tools=[read])
+            turn = await provider_instance.aturn(history, tools=[read])
             assert turn.tool_calls[0].arguments == {"key": "intro"}
             history.extend([turn, ToolResult("call_1", "Introduction")])
-            final = await backend.aturn(history, tools=[read])
+            final = await provider_instance.aturn(history, tools=[read])
             assert final.text == "  answer\n" and final.stop_reason == "end_turn"
             assert not http_client.is_closed and not client.is_closed()
 

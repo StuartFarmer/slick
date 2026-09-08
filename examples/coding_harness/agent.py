@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from slick import Prompt, ToolError, parse
-from slick.backends import BackendError
+from slick.providers import ProviderError
 from slick.tools import prepare_tools
 from slick.turns import ToolResult, UserMessage, validate_history
 
@@ -19,10 +19,10 @@ class RunStopped(RuntimeError):
 
 
 class CodingAgent:
-    def __init__(self, backend, workspace, config, *, emit=lambda event: None):
-        self.backend, self.workspace, self.config = backend, workspace, config
+    def __init__(self, provider, workspace, config, *, emit=lambda event: None):
+        self.provider, self.workspace, self.config = provider, workspace, config
         self.emit = emit
-        identity = backend.identity()
+        identity = provider.identity()
         self.state = SessionState(
             provider=identity["provider"],
             model=identity["model"],
@@ -182,7 +182,7 @@ class CodingAgent:
         if size > limits.context_soft_chars and not self._compacted_last:
             try:
                 await self._compact()
-            except (ValueError, RuntimeError, BackendError) as error:
+            except (ValueError, RuntimeError, ProviderError) as error:
                 self._event("status", text=f"Context summary failed: {error}")
             size = context_size(
                 self.state.history, instructions=instructions, tools=list(self.tools.values())
@@ -195,7 +195,7 @@ class CodingAgent:
         instructions = await self._context()
         self._request_budget()
         self._event("status", text="Waiting for model")
-        turn = await self.backend.aturn(
+        turn = await self.provider.aturn(
             self.state.history, tools=list(self.tools.values()), instructions=instructions
         )
         placeholders = [ToolResult(call.id, "pending") for call in turn.tool_calls]
@@ -281,7 +281,7 @@ class CodingAgent:
         self.state.edit_ledger = list(self.workspace.edit_ledger)
         text = summary_prompt(self.state, self.config)
         self._request_budget()
-        response = await self.backend.aturn([UserMessage(text)], tools=[])
+        response = await self.provider.aturn([UserMessage(text)], tools=[])
         if response.tool_calls:
             raise ValueError("Summary must not request tools")
         summary = parse(response.text, ContextSummary)

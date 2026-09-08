@@ -1,13 +1,13 @@
-"""SDK-free native codecs and one-request backend boundaries."""
+"""SDK-free native codecs and one-request provider boundaries."""
 
 import asyncio
 import importlib
 from copy import deepcopy
 
 import pytest
-from test_api_backends import Client
+from test_api_providers import Client
 
-from slick.backends import Anthropic, BackendError, OpenAI
+from slick.providers import AnthropicAPI, OpenAIAPI, ProviderError
 from slick.tools import prepare_tools
 from slick.turns import ModelTurn, ToolCall, ToolResult, UserMessage
 
@@ -238,16 +238,22 @@ def test_anthropic_rejects_inconsistent_or_unsupported_stop_conditions(stop, cal
         codec("anthropic").decode_turn(response, model="test-model")
 
 
-@pytest.mark.parametrize("provider,backend_class", [("openai", OpenAI), ("anthropic", Anthropic)])
+@pytest.mark.parametrize(
+    "provider,provider_class", [("openai", OpenAIAPI), ("anthropic", AnthropicAPI)]
+)
 @pytest.mark.parametrize("with_tools", [True, False])
 def test_aturn_sends_one_request_with_instructions_and_never_executes(
-    provider, backend_class, with_tools
+    provider, provider_class, with_tools
 ):
     client = Client(JsonResponse(reply(provider, calls=with_tools)), asynchronous=True)
-    backend = backend_class("test-model", async_client=client, timeout=12.5, max_output_tokens=123)
+    provider_instance = provider_class(
+        "test-model", async_client=client, timeout=12.5, max_output_tokens=123
+    )
     history = [UserMessage("read")]
     turn = asyncio.run(
-        backend.aturn(history, tools=[read] if with_tools else [], instructions="Be brief.")
+        provider_instance.aturn(
+            history, tools=[read] if with_tools else [], instructions="Be brief."
+        )
     )
     assert turn.text == "Looking. "
     assert history == [UserMessage("read")]
@@ -274,13 +280,15 @@ def test_aturn_sends_one_request_with_instructions_and_never_executes(
         )
 
 
-@pytest.mark.parametrize("provider,backend_class", [("openai", OpenAI), ("anthropic", Anthropic)])
+@pytest.mark.parametrize(
+    "provider,provider_class", [("openai", OpenAIAPI), ("anthropic", AnthropicAPI)]
+)
 @pytest.mark.parametrize("problem", ["definition", "history", "unexpected_calls"])
 def test_aturn_rejects_invalid_inputs_before_io_and_unadvertised_calls(
-    provider, backend_class, problem
+    provider, provider_class, problem
 ):
     client = Client(JsonResponse(reply(provider)), asynchronous=True)
-    backend = backend_class("test-model", async_client=client)
+    provider_instance = provider_class("test-model", async_client=client)
     history, tools = [UserMessage("read")], [read]
     if problem == "definition":
         tools = [lambda missing_annotation: None]
@@ -290,28 +298,32 @@ def test_aturn_rejects_invalid_inputs_before_io_and_unadvertised_calls(
         ]
     else:
         tools = []
-    with pytest.raises(BackendError):
-        asyncio.run(backend.aturn(history, tools=tools))
+    with pytest.raises(ProviderError):
+        asyncio.run(provider_instance.aturn(history, tools=tools))
     assert len(client.state["requests"]) == (1 if problem == "unexpected_calls" else 0)
 
 
-@pytest.mark.parametrize("provider,backend_class", [("openai", OpenAI), ("anthropic", Anthropic)])
+@pytest.mark.parametrize(
+    "provider,provider_class", [("openai", OpenAIAPI), ("anthropic", AnthropicAPI)]
+)
 @pytest.mark.parametrize("error", [RuntimeError("offline"), asyncio.CancelledError()])
-def test_aturn_errors_preserve_causes_and_cancellation(provider, backend_class, error):
+def test_aturn_errors_preserve_causes_and_cancellation(provider, provider_class, error):
     client = Client(error, asynchronous=True)
-    backend = backend_class("test-model", async_client=client)
+    provider_instance = provider_class("test-model", async_client=client)
     with pytest.raises(
-        asyncio.CancelledError if isinstance(error, asyncio.CancelledError) else BackendError
+        asyncio.CancelledError if isinstance(error, asyncio.CancelledError) else ProviderError
     ) as caught:
-        asyncio.run(backend.aturn([UserMessage("read")], tools=[]))
+        asyncio.run(provider_instance.aturn([UserMessage("read")], tools=[]))
     if isinstance(error, RuntimeError):
         assert caught.value.__cause__ is error
     assert client.state["closed"] == 0
 
 
-@pytest.mark.parametrize("provider,backend_class", [("openai", OpenAI), ("anthropic", Anthropic)])
+@pytest.mark.parametrize(
+    "provider,provider_class", [("openai", OpenAIAPI), ("anthropic", AnthropicAPI)]
+)
 @pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])
-def test_aturn_closes_owned_client_on_every_exit(provider, backend_class, outcome, monkeypatch):
+def test_aturn_closes_owned_client_on_every_exit(provider, provider_class, outcome, monkeypatch):
     import sys
     from types import SimpleNamespace
 
@@ -329,30 +341,35 @@ def test_aturn_closes_owned_client_on_every_exit(provider, backend_class, outcom
 
     name = "AsyncOpenAI" if provider == "openai" else "AsyncAnthropic"
     monkeypatch.setitem(sys.modules, provider, SimpleNamespace(**{name: factory}))
-    backend = backend_class("test-model", timeout=7, max_retries=1)
+    provider_instance = provider_class("test-model", timeout=7, max_retries=1)
     if outcome == "success":
-        assert asyncio.run(backend.aturn([UserMessage("read")], tools=[])).text == "Looking. "
+        assert (
+            asyncio.run(provider_instance.aturn([UserMessage("read")], tools=[])).text
+            == "Looking. "
+        )
     else:
-        error = BackendError if outcome == "error" else asyncio.CancelledError
+        error = ProviderError if outcome == "error" else asyncio.CancelledError
         with pytest.raises(error):
-            asyncio.run(backend.aturn([UserMessage("read")], tools=[]))
+            asyncio.run(provider_instance.aturn([UserMessage("read")], tools=[]))
     assert options_seen == [{"timeout": 7, "max_retries": 1}]
     assert client.state["entered"] == client.state["closed"] == 1
 
 
-@pytest.mark.parametrize("provider,backend_class", [("openai", OpenAI), ("anthropic", Anthropic)])
+@pytest.mark.parametrize(
+    "provider,provider_class", [("openai", OpenAIAPI), ("anthropic", AnthropicAPI)]
+)
 def test_aturn_missing_extra_is_lazy_and_preparation_precedes_client(
-    provider, backend_class, monkeypatch
+    provider, provider_class, monkeypatch
 ):
     import sys
 
     monkeypatch.setitem(sys.modules, provider, None)
-    backend = backend_class("test-model")
-    with pytest.raises(BackendError, match="definition"):
-        asyncio.run(backend.aturn([UserMessage("read")], tools=[lambda invalid: None]))
-    with pytest.raises(BackendError, match="unresolved"):
+    provider_instance = provider_class("test-model")
+    with pytest.raises(ProviderError, match="definition"):
+        asyncio.run(provider_instance.aturn([UserMessage("read")], tools=[lambda invalid: None]))
+    with pytest.raises(ProviderError, match="unresolved"):
         asyncio.run(
-            backend.aturn(
+            provider_instance.aturn(
                 [
                     UserMessage("read"),
                     ModelTurn(
@@ -362,5 +379,5 @@ def test_aturn_missing_extra_is_lazy_and_preparation_precedes_client(
                 tools=[],
             )
         )
-    with pytest.raises(BackendError, match=rf"slick-ai\[{provider}\]"):
-        asyncio.run(backend.aturn([UserMessage("read")], tools=[]))
+    with pytest.raises(ProviderError, match=rf"slick-ai\[{provider}\]"):
+        asyncio.run(provider_instance.aturn([UserMessage("read")], tools=[]))

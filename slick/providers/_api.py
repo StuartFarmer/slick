@@ -1,7 +1,7 @@
-"""Optional API backends: one complete prompt in, one complete text response out.
+"""Native API providers: one complete prompt in, one complete text response out.
 
-SDKs are imported on first use. Clients created here live for one call;
-clients supplied by the application remain the application's responsibility.
+SDKs are imported on first use. Native clients created here live for one call;
+injected native clients belong to the application.
 """
 
 from __future__ import annotations
@@ -12,12 +12,10 @@ from dataclasses import KW_ONLY, dataclass, field
 from importlib import import_module
 from typing import Any
 
-from . import _anthropic_turns, _openai_turns
-from .models import ModelError
-from .tools import prepare_tools
-from .turns import ModelTurn, ToolResult, UserMessage, validate_history
-
-BackendError = ModelError
+from .. import _anthropic_turns, _openai_turns
+from ..tools import prepare_tools
+from ..turns import ModelTurn, ToolResult, UserMessage, validate_history
+from ._base import Provider, ProviderError
 
 
 def _validate(model, timeout, max_output_tokens, max_retries):
@@ -44,47 +42,47 @@ def _client(provider, name, injected, timeout, max_retries):
     try:
         sdk = import_module(provider)
     except ImportError as exc:
-        raise BackendError(f"Install slick-ai[{provider}] to use this backend.") from exc
+        raise ProviderError(f"Install slick-ai[{provider}] to use this provider.") from exc
     return getattr(sdk, name)(**options)
 
 
 def _openai_text(response):
     if response.status != "completed":
-        raise BackendError(f"OpenAI response did not complete: {response.status}.")
+        raise ProviderError(f"OpenAI response did not complete: {response.status}.")
     text = []
     for item in response.output:
         if item.type == "reasoning":
             continue
         if item.type != "message":
-            raise BackendError(f"Unexpected OpenAI output: {item.type}.")
+            raise ProviderError(f"Unexpected OpenAI output: {item.type}.")
         if item.status != "completed":
-            raise BackendError(f"OpenAI message did not complete: {item.status}.")
+            raise ProviderError(f"OpenAI message did not complete: {item.status}.")
         for block in item.content:
             if block.type != "output_text":
-                raise BackendError(f"Unexpected OpenAI content: {block.type}.")
+                raise ProviderError(f"Unexpected OpenAI content: {block.type}.")
             text.append(block.text)
     if not text:
-        raise BackendError("OpenAI returned no text content.")
+        raise ProviderError("OpenAI returned no text content.")
     return "".join(text)
 
 
 def _anthropic_text(response):
     if response.stop_reason not in {"end_turn", "stop_sequence"}:
-        raise BackendError(f"Anthropic response did not complete: {response.stop_reason}.")
+        raise ProviderError(f"Anthropic response did not complete: {response.stop_reason}.")
     text = []
     for block in response.content:
         if block.type in {"thinking", "redacted_thinking"}:
             continue
         if block.type != "text":
-            raise BackendError(f"Unexpected Anthropic content: {block.type}.")
+            raise ProviderError(f"Unexpected Anthropic content: {block.type}.")
         text.append(block.text)
     if not text:
-        raise BackendError("Anthropic returned no text content.")
+        raise ProviderError("Anthropic returned no text content.")
     return "".join(text)
 
 
 @dataclass
-class OpenAI:
+class OpenAIAPI(Provider):
     """OpenAI Responses API. Supply an explicit model and optionally SDK clients."""
 
     model: str
@@ -120,10 +118,10 @@ class OpenAI:
         try:
             with _client("openai", "OpenAI", self.client, self.timeout, self.max_retries) as client:
                 return _openai_text(client.responses.create(**self._request(text)))
-        except BackendError:
+        except ProviderError:
             raise
         except Exception as exc:
-            raise BackendError("OpenAI request failed.") from exc
+            raise ProviderError("OpenAI request failed.") from exc
 
     async def acall(self, text: str) -> str:
         try:
@@ -131,10 +129,10 @@ class OpenAI:
                 "openai", "AsyncOpenAI", self.async_client, self.timeout, self.max_retries
             ) as client:
                 return _openai_text(await client.responses.create(**self._request(text)))
-        except BackendError:
+        except ProviderError:
             raise
         except Exception as exc:
-            raise BackendError("OpenAI request failed.") from exc
+            raise ProviderError("OpenAI request failed.") from exc
 
     def _turn_request(self, history, tools, instructions):
         prepared = prepare_tools(tools)
@@ -167,14 +165,14 @@ class OpenAI:
             if turn.tool_calls and not request["tools"]:
                 raise ValueError("OpenAI returned tool calls with no tools available")
             return turn
-        except BackendError:
+        except ProviderError:
             raise
         except Exception as exc:
-            raise BackendError(f"OpenAI native turn failed: {exc}") from exc
+            raise ProviderError(f"OpenAI native turn failed: {exc}") from exc
 
 
 @dataclass
-class Anthropic:
+class AnthropicAPI(Provider):
     """Anthropic Messages API. Supply an explicit model and optionally SDK clients."""
 
     model: str
@@ -211,10 +209,10 @@ class Anthropic:
                 "anthropic", "Anthropic", self.client, self.timeout, self.max_retries
             ) as client:
                 return _anthropic_text(client.messages.create(**self._request(text)))
-        except BackendError:
+        except ProviderError:
             raise
         except Exception as exc:
-            raise BackendError("Anthropic request failed.") from exc
+            raise ProviderError("Anthropic request failed.") from exc
 
     async def acall(self, text: str) -> str:
         try:
@@ -222,10 +220,10 @@ class Anthropic:
                 "anthropic", "AsyncAnthropic", self.async_client, self.timeout, self.max_retries
             ) as client:
                 return _anthropic_text(await client.messages.create(**self._request(text)))
-        except BackendError:
+        except ProviderError:
             raise
         except Exception as exc:
-            raise BackendError("Anthropic request failed.") from exc
+            raise ProviderError("Anthropic request failed.") from exc
 
     def _turn_request(self, history, tools, instructions):
         prepared = prepare_tools(tools)
@@ -260,7 +258,7 @@ class Anthropic:
             if turn.tool_calls and not request["tools"]:
                 raise ValueError("Anthropic returned tool calls with no tools available")
             return turn
-        except BackendError:
+        except ProviderError:
             raise
         except Exception as exc:
-            raise BackendError(f"Anthropic native turn failed: {exc}") from exc
+            raise ProviderError(f"Anthropic native turn failed: {exc}") from exc

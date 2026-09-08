@@ -16,7 +16,7 @@ class Summary(BaseModel):
     points: list[str]
 
 
-class Backend:
+class FakeProvider:
     def __init__(self, response="answer"):
         self.response = response
         self.calls = []
@@ -30,7 +30,7 @@ class Backend:
         return self.call(text)
 
     def identity(self):
-        return {"backend": "test", "response": self.response}
+        return {"provider": "test", "response": self.response}
 
 
 @pytest.fixture
@@ -60,7 +60,7 @@ def test_render_composes_history_macros_and_includes_without_execution(root):
     assert not (root / "logs").exists()
 
 
-def test_parse_is_shared_and_does_not_call_a_backend():
+def test_parse_is_shared_and_does_not_call_a_provider():
     assert slick.parse("  exact text\n") == "  exact text\n"
     assert slick.parse("```json\n[1, 2]\n```", list[int]) == [1, 2]
     assert slick.parse('{"headline":"H", "points":[]}', Summary).headline == "H"
@@ -71,10 +71,10 @@ def test_parse_is_shared_and_does_not_call_a_backend():
 def test_prompt_object_renders_lazily_with_execution_options_as_template_data(root, capsys):
     reply = slick.Prompt("reply.j2")
     (root / "reply.j2").write_text(
-        "{{ question }} / {{ backend }} / {{ model }} / {{ output }} / {{ template }}"
+        "{{ question }} / {{ provider }} / {{ model }} / {{ output }} / {{ template }}"
     )
     assert (
-        reply(question="Why?", backend="context", model="example", output="text", template="data")
+        reply(question="Why?", provider="context", model="example", output="text", template="data")
         == "Why? / context / example / text / data"
     )
     (root / "reply.j2").write_text("Updated: {{ question }}")
@@ -85,25 +85,25 @@ def test_prompt_object_renders_lazily_with_execution_options_as_template_data(ro
     assert capsys.readouterr() == ("", "")
 
 
-def test_backend_calls_do_not_implicitly_cache_log_or_rewrite(root, capsys):
-    backend = Backend("  answer\n")
+def test_provider_calls_do_not_implicitly_cache_log_or_rewrite(root, capsys):
+    provider = FakeProvider("  answer\n")
 
-    @slick.prompt(backend=backend)
-    def answer(question: str, backend: str = "context") -> str:
-        """{{ question }} / {{ backend }}"""
+    @slick.prompt(provider=provider)
+    def answer(question: str, provider: str = "context") -> str:
+        """{{ question }} / {{ provider }}"""
 
     assert answer("why") == "  answer\n"
     assert answer("why") == "  answer\n"
-    assert backend.calls == ["why / context", "why / context"]
+    assert provider.calls == ["why / context", "why / context"]
     assert not (root / "logs").exists()
     assert capsys.readouterr() == ("", "")
-    assert str(inspect.signature(answer)) == "(question: str, backend: str = 'context') -> str"
+    assert str(inspect.signature(answer)) == "(question: str, provider: str = 'context') -> str"
 
 
 def test_modern_invalid_output_is_not_repaired_and_preserves_response(root):
-    backend = Backend("invalid")
+    provider = FakeProvider("invalid")
 
-    @slick.prompt(backend=backend)
+    @slick.prompt(provider=provider)
     def summarize(document: str) -> Summary:
         """{{ document }}\n{{ output_format }}"""
 
@@ -111,14 +111,14 @@ def test_modern_invalid_output_is_not_repaired_and_preserves_response(root):
         summarize("data")
     assert caught.value.response == "invalid"
     assert isinstance(caught.value.__cause__, ValidationError)
-    assert len(backend.calls) == 1
-    assert backend.calls[0].count("# Output Format") == 1
+    assert len(provider.calls) == 1
+    assert provider.calls[0].count("# Output Format") == 1
     assert not (root / "logs").exists()
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_explicit_cache_logs_only_accepted_typed_output(root, asynchronous):
-    backend = Backend('{"headline":"H", "points":[]}')
+    provider = FakeProvider('{"headline":"H", "points":[]}')
 
     def declaration(document: str) -> Summary:
         """{{ document }}"""
@@ -126,7 +126,7 @@ def test_explicit_cache_logs_only_accepted_typed_output(root, asynchronous):
     async def async_declaration(document: str) -> Summary:
         """{{ document }}"""
 
-    fn = slick.prompt(backend=backend, cache=True, log_dir=root / "chosen")(
+    fn = slick.prompt(provider=provider, cache=True, log_dir=root / "chosen")(
         async_declaration if asynchronous else declaration
     )
     if asynchronous:
@@ -138,7 +138,7 @@ def test_explicit_cache_logs_only_accepted_typed_output(root, asynchronous):
     else:
         first, second = fn("x"), fn("x")
     assert first == second == Summary(headline="H", points=[])
-    assert len(backend.calls) == 1
+    assert len(provider.calls) == 1
     assert len(list((root / "chosen").glob("*/response.txt"))) == 1
 
 
@@ -148,7 +148,7 @@ def test_async_functions_render_and_execute_without_hidden_sync_calls(root):
             await asyncio.sleep(0)
             return '{"headline":"' + text.splitlines()[0] + '", "points":[]}'
 
-    @slick.prompt(backend=AsyncOnly())
+    @slick.prompt(provider=AsyncOnly())
     async def summarize(document: str) -> Summary:
         """{{ document }} {{ count }}"""
         await asyncio.sleep(0)
@@ -164,7 +164,7 @@ def test_async_functions_render_and_execute_without_hidden_sync_calls(root):
     assert not (root / "logs").exists()
 
 
-def test_async_cancellation_reaches_backend(root):
+def test_async_cancellation_reaches_provider(root):
     async def run():
         entered = asyncio.Event()
         cancelled = asyncio.Event()
@@ -177,7 +177,7 @@ def test_async_cancellation_reaches_backend(root):
                 finally:
                     cancelled.set()
 
-        @slick.prompt(backend=Waiting())
+        @slick.prompt(provider=Waiting())
         async def answer(question: str) -> str:
             """{{ question }}"""
 
@@ -191,22 +191,22 @@ def test_async_cancellation_reaches_backend(root):
     asyncio.run(run())
 
 
-def test_backend_selection_is_explicit_and_unsupported_async_fails(root):
-    with pytest.raises(slick.PromptError, match=r"model.*backend|backend.*model"):
-        slick.prompt(model=Backend(), backend=Backend())(lambda: None)
+def test_provider_selection_is_explicit_and_unsupported_async_fails(root):
+    with pytest.raises(slick.PromptError, match=r"model.*provider|provider.*model"):
+        slick.prompt(model=FakeProvider(), provider=FakeProvider())(lambda: None)
 
-    @slick.prompt(backend=Backend())
+    @slick.prompt(provider=FakeProvider())
     def answer(question: str) -> str:
         """{{ question }}"""
 
     with pytest.raises(slick.PromptError, match="model"):
-        answer("x", model=Backend())
+        answer("x", model=FakeProvider())
 
     class SyncOnly:
         def call(self, text):
             raise AssertionError("sync call must not be attempted")
 
-    @slick.prompt(backend=SyncOnly())
+    @slick.prompt(provider=SyncOnly())
     async def async_answer(question: str) -> str:
         """{{ question }}"""
 
@@ -214,18 +214,18 @@ def test_backend_selection_is_explicit_and_unsupported_async_fails(root):
         asyncio.run(async_answer("x"))
 
 
-def test_custom_backend_needs_no_identity_unless_persistence_is_enabled(root):
+def test_custom_provider_needs_no_identity_unless_persistence_is_enabled(root):
     class Minimal:
         def call(self, text):
             return text
 
-    @slick.prompt(backend=Minimal())
+    @slick.prompt(provider=Minimal())
     def echo(value: str) -> str:
         """{{ value }}"""
 
     assert echo("hello") == "hello"
 
-    @slick.prompt(backend=Minimal(), cache=True)
+    @slick.prompt(provider=Minimal(), cache=True)
     def cached(value: str) -> str:
         """{{ value }}"""
 
@@ -235,12 +235,12 @@ def test_custom_backend_needs_no_identity_unless_persistence_is_enabled(root):
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_explicit_repairs_do_not_require_disk_persistence(root, asynchronous):
-    class Repairing(Backend):
+    class Repairing(FakeProvider):
         def call(self, text):
             self.calls.append(text)
             return "bad" if len(self.calls) == 1 else "[1,2]"
 
-    backend = Repairing()
+    provider = Repairing()
 
     def declaration() -> list[int]:
         """Numbers"""
@@ -248,17 +248,17 @@ def test_explicit_repairs_do_not_require_disk_persistence(root, asynchronous):
     async def async_declaration() -> list[int]:
         """Numbers"""
 
-    fn = slick.prompt(backend=backend, max_repairs=1)(
+    fn = slick.prompt(provider=provider, max_repairs=1)(
         async_declaration if asynchronous else declaration
     )
     assert (asyncio.run(fn()) if asynchronous else fn()) == [1, 2]
-    assert len(backend.calls) == 2
-    assert "# Repair" in backend.calls[1]
+    assert len(provider.calls) == 2
+    assert "# Repair" in provider.calls[1]
     assert not (root / "logs").exists()
 
 
 def test_output_save_remains_explicit_on_modern_path(root):
-    @slick.prompt(backend=Backend("answer"))
+    @slick.prompt(provider=FakeProvider("answer"))
     def answer() -> str:
         """Answer"""
 

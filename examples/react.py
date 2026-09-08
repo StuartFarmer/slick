@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from examples._cli import ScriptedBackend, backend_from_args, parser, positive_int
+from examples._cli import ScriptedProvider, parser, positive_int, provider_from_args
 from slick import Prompt, parse
 
 DEFAULT_GOAL = "When does Atlas launch, and what must happen first?"
@@ -47,10 +47,10 @@ Action = Annotated[Search | Finish, Field(discriminator="kind")]
 class Researcher:
     """Keep a goal, observations, evidence, and a lifetime step budget per instance."""
 
-    def __init__(self, backend, goal: str, *, documents=None, max_steps: int = 4):
+    def __init__(self, provider, goal: str, *, documents=None, max_steps: int = 4):
         if type(max_steps) is not int or max_steps < 1:
             raise ValueError("max_steps must be a positive integer")
-        self.backend = backend
+        self.provider = provider
         self.goal = goal
         self.documents = [dict(doc) for doc in (DOCUMENTS if documents is None else documents)]
         self.tools = {"search_documents": self.search_documents}
@@ -84,7 +84,7 @@ class Researcher:
             remaining=self.max_steps - self.steps,
             schema=TypeAdapter(Action).json_schema(),
         )
-        action = parse(await self.backend.acall(text), Action)
+        action = parse(await self.provider.acall(text), Action)
         if isinstance(action, Search):
             if action.tool not in self.tools:
                 raise ValueError(f"Tool is not allowlisted: {action.tool}")
@@ -108,15 +108,15 @@ def main(argv=None) -> int:
     argument_parser.add_argument("--goal", default=DEFAULT_GOAL)
     argument_parser.add_argument("--max-steps", type=positive_int, default=4)
     args = argument_parser.parse_args(argv)
-    demo = ScriptedBackend(
+    demo = ScriptedProvider(
         [
             '{"kind":"search","tool":"search_documents","query":"Atlas"}',
             '{"kind":"finish","answer":"Atlas launches on October 12, after the security '
             'review and restore drill.","citations":["schedule","readiness"]}',
         ]
     )
-    backend = backend_from_args(args, argument_parser, demo)
-    researcher = Researcher(backend, args.goal, max_steps=args.max_steps)
+    provider = provider_from_args(args, argument_parser, demo)
+    researcher = Researcher(provider, args.goal, max_steps=args.max_steps)
     try:
         result = asyncio.run(researcher.run())
     except (RuntimeError, ValueError) as exc:

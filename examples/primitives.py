@@ -25,7 +25,7 @@ def main():
             state={
                 "facts": ["Templates use Jinja"],
                 "decisions": ["Keep state in Python"],
-                "questions": ["Which backend should execute the text?"],
+                "questions": ["Which provider should execute the text?"],
             },
             records=[{"action": "read guide", "result": "Found the rendering contract"}],
         )

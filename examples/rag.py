@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from slick import Prompt, parse
 
-from ._cli import ScriptedBackend, backend_from_args, parser
+from ._cli import ScriptedProvider, parser, provider_from_args
 
 
 class GroundedAnswer(BaseModel):
@@ -17,8 +17,8 @@ class GroundedAnswer(BaseModel):
 
 
 class GroundedAnswerer:
-    def __init__(self, backend, documents):
-        self.backend = backend
+    def __init__(self, provider, documents):
+        self.provider = provider
         self.documents = documents
         self.prompt = Prompt("rag/answer.j2")
         self.evidence = []
@@ -39,7 +39,7 @@ class GroundedAnswerer:
         text = self.prompt(
             question=question, documents=documents, schema=GroundedAnswer.model_json_schema()
         )
-        answer = parse(await self.backend.acall(text), GroundedAnswer)
+        answer = parse(await self.provider.acall(text), GroundedAnswer)
         if not set(answer.citations) <= {document["id"] for document in documents}:
             raise ValueError("Answer contains a citation outside the retrieved evidence")
         self.evidence, self.answer = documents, answer
@@ -70,8 +70,8 @@ def main(argv=None):
             "citations": [d["id"] for d in demo_documents],
         }
     )
-    backend = backend_from_args(args, p, ScriptedBackend([demo_answer]))
-    answer = asyncio.run(GroundedAnswerer(backend, documents).ask(args.question))
+    provider = provider_from_args(args, p, ScriptedProvider([demo_answer]))
+    answer = asyncio.run(GroundedAnswerer(provider, documents).ask(args.question))
     print(answer.model_dump_json(indent=2))
 
 

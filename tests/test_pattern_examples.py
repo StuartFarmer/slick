@@ -45,7 +45,7 @@ def test_shared_primitives_render_as_one_standalone_example():
 def test_self_refiner_methods_and_failed_draft_preserve_state(template_root):
     module = importlib.import_module("examples.self_refine")
 
-    class Backend:
+    class FakeProvider:
         def __init__(self):
             self.inputs = []
             self.responses = iter(["draft", "add evidence", "revision"])
@@ -57,16 +57,16 @@ def test_self_refiner_methods_and_failed_draft_preserve_state(template_root):
             return next(self.responses)
 
     async def run():
-        backend = Backend()
-        writer = module.SelfRefiner("Explain Slick", backend, ["Accuracy"])
+        provider = FakeProvider()
+        writer = module.SelfRefiner("Explain Slick", provider, ["Accuracy"])
         with pytest.raises(ValueError):
             await writer.critique()
         assert await writer.draft() == "draft"
         assert await writer.critique() == "add evidence"
         assert await writer.revise() == "revision"
         assert writer.feedback is None
-        assert "Accuracy" in backend.inputs[1]
-        assert "draft" in backend.inputs[2] and "add evidence" in backend.inputs[2]
+        assert "Accuracy" in provider.inputs[1]
+        assert "draft" in provider.inputs[2] and "add evidence" in provider.inputs[2]
         with pytest.raises(RuntimeError):
             await writer.draft()
         assert writer.answer == "revision"
@@ -91,7 +91,7 @@ def test_self_refiner_methods_and_failed_draft_preserve_state(template_root):
 )
 def test_pattern_command_runs_without_credentials(module):
     result = subprocess.run(
-        [sys.executable, "-m", f"examples.{module}", "--backend", "demo"],
+        [sys.executable, "-m", f"examples.{module}", "--provider", "demo"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -100,7 +100,7 @@ def test_pattern_command_runs_without_credentials(module):
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip()
     invalid = subprocess.run(
-        [sys.executable, "-m", f"examples.{module}", "--backend", "openai"],
+        [sys.executable, "-m", f"examples.{module}", "--provider", "openai"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -113,13 +113,14 @@ def test_pattern_command_runs_without_credentials(module):
 def test_grounded_answer_checks_citations_against_retrieved_evidence(template_root):
     module = importlib.import_module("examples.rag")
 
-    class Backend:
+    class FakeProvider:
         async def acall(self, text):
             assert "[history]" in text
             return '{"answer":"Use messages", "citations":["invented"]}'
 
     qa = module.GroundedAnswerer(
-        Backend(), [{"id": "history", "source": "guide", "text": "History is a list of messages."}]
+        FakeProvider(),
+        [{"id": "history", "source": "guide", "text": "History is a list of messages."}],
     )
     with pytest.raises(ValueError, match="citation"):
         asyncio.run(qa.ask("history"))

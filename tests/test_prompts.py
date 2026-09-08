@@ -19,10 +19,10 @@ class Verdict(BaseModel):
     reasons: list[str]
 
 
-class StubModel:
+class StubProvider:
     """Hands back canned responses in order, repeating the last one."""
 
-    backend = "stub"
+    provider = "stub"
     model = None
 
     def __init__(self, *responses: str) -> None:
@@ -244,7 +244,7 @@ class Decoration(unittest.TestCase):
 
 class TextReturns(Logged):
     def test_returns_the_response_and_logs_the_exchange(self):
-        model = StubModel("# Summary\n")
+        model = StubProvider("# Summary\n")
 
         @prompt(model=model, log_dir=self.tmp)
         def summarize(document: str) -> str:
@@ -256,7 +256,7 @@ class TextReturns(Logged):
         self.assertEqual((run / "response.txt").read_text(), "# Summary\n")
 
     def test_output_also_saves_the_text(self):
-        @prompt(model=StubModel("# Summary\n"), log_dir=self.tmp)
+        @prompt(model=StubProvider("# Summary\n"), log_dir=self.tmp)
         def summarize(document: str) -> str:
             """{{ document }}"""
 
@@ -265,7 +265,7 @@ class TextReturns(Logged):
         self.assertEqual(report.read_text(), "# Summary\n")
 
     def test_an_empty_response_is_not_written(self):
-        @prompt(model=StubModel("  \n"), log_dir=self.tmp)
+        @prompt(model=StubProvider("  \n"), log_dir=self.tmp)
         def summarize(document: str) -> str:
             """{{ document }}"""
 
@@ -275,7 +275,7 @@ class TextReturns(Logged):
         self.assertFalse(report.exists())
 
     def test_an_identical_prompt_is_served_from_the_cache(self):
-        model = StubModel("# Summary\n")
+        model = StubProvider("# Summary\n")
 
         @prompt(model=model, log_dir=self.tmp)
         def summarize(document: str) -> str:
@@ -285,7 +285,7 @@ class TextReturns(Logged):
         self.assertEqual(len(model.prompts), 1)
 
     def test_a_changed_prompt_is_a_different_call(self):
-        model = StubModel("# Summary\n")
+        model = StubProvider("# Summary\n")
 
         @prompt(model=model, log_dir=self.tmp)
         def summarize(document: str) -> str:
@@ -297,7 +297,7 @@ class TextReturns(Logged):
         self.assertEqual(len(self.runs()), 2)
 
     def test_cache_off_calls_every_time(self):
-        model = StubModel("# Summary\n")
+        model = StubProvider("# Summary\n")
 
         @prompt(model=model, log_dir=self.tmp, cache=False)
         def summarize(document: str) -> str:
@@ -308,7 +308,7 @@ class TextReturns(Logged):
         self.assertEqual(len(model.prompts), 2)
 
     def test_a_per_call_model_overrides_the_decorated_one(self):
-        decorated, override = StubModel("from decorated"), StubModel("from override")
+        decorated, override = StubProvider("from decorated"), StubProvider("from override")
 
         @prompt(model=decorated, log_dir=self.tmp)
         def summarize(document: str) -> str:
@@ -320,7 +320,7 @@ class TextReturns(Logged):
 
 class TypedReturns(Logged):
     def test_the_schema_is_appended_when_the_template_never_asks(self):
-        @prompt(model=StubModel(), log_dir=self.tmp)
+        @prompt(model=StubProvider(), log_dir=self.tmp)
         def judge(document: str) -> Verdict:
             """{{ document }}"""
 
@@ -330,7 +330,7 @@ class TypedReturns(Logged):
         self.assertLess(rendered.index("DOCBODY"), rendered.index("# Output Format"))
 
     def test_the_schema_lands_where_the_template_puts_it(self):
-        @prompt(model=StubModel(), log_dir=self.tmp)
+        @prompt(model=StubProvider(), log_dir=self.tmp)
         def judge(document: str) -> Verdict:
             """
             {{ output_format }}
@@ -344,14 +344,14 @@ class TypedReturns(Logged):
         self.assertLess(rendered.index("# Output Format"), rendered.index("DOCBODY"))
 
     def test_a_text_return_gets_no_schema(self):
-        @prompt(model=StubModel(), log_dir=self.tmp)
+        @prompt(model=StubProvider(), log_dir=self.tmp)
         def summarize(document: str) -> str:
             """{{ document }}{{ output_format }}"""
 
         self.assertEqual(summarize.render("DOCBODY"), "DOCBODY")
 
     def test_a_fenced_json_response_is_validated(self):
-        model = StubModel('```json\n{"approved": true, "reasons": []}\n```')
+        model = StubProvider('```json\n{"approved": true, "reasons": []}\n```')
 
         @prompt(model=model, log_dir=self.tmp)
         def judge(document: str) -> Verdict:
@@ -362,7 +362,7 @@ class TypedReturns(Logged):
         self.assertTrue(verdict.approved)
 
     def test_prose_around_the_json_is_tolerated(self):
-        model = StubModel('Sure! {"approved": false, "reasons": ["no data"]} Hope that helps.')
+        model = StubProvider('Sure! {"approved": false, "reasons": ["no data"]} Hope that helps.')
 
         @prompt(model=model, log_dir=self.tmp)
         def judge(document: str) -> Verdict:
@@ -371,14 +371,14 @@ class TypedReturns(Logged):
         self.assertEqual(judge("DOCBODY").reasons, ["no data"])
 
     def test_a_bare_scalar_answer_is_coerced(self):
-        @prompt(model=StubModel("approve"), log_dir=self.tmp)
+        @prompt(model=StubProvider("approve"), log_dir=self.tmp)
         def decide(document: str) -> Literal["approve", "reject"]:
             """{{ document }}"""
 
         self.assertEqual(decide("DOCBODY"), "approve")
 
     def test_output_is_refused_for_a_structured_return(self):
-        @prompt(model=StubModel(), log_dir=self.tmp)
+        @prompt(model=StubProvider(), log_dir=self.tmp)
         def judge(document: str) -> Verdict:
             """{{ document }}"""
 
@@ -386,7 +386,7 @@ class TypedReturns(Logged):
             judge("DOCBODY", output=self.tmp / "verdict.json")
 
     def test_a_cached_structured_response_is_parsed_without_a_call(self):
-        model = StubModel('{"approved": true, "reasons": []}')
+        model = StubProvider('{"approved": true, "reasons": []}')
 
         @prompt(model=model, log_dir=self.tmp)
         def judge(document: str) -> Verdict:
@@ -398,7 +398,7 @@ class TypedReturns(Logged):
 
 class Repair(Logged):
     def test_an_unparseable_response_is_handed_back_once(self):
-        model = StubModel("I could not do it.", '{"approved": true, "reasons": []}')
+        model = StubProvider("I could not do it.", '{"approved": true, "reasons": []}')
 
         @prompt(model=model, log_dir=self.tmp)
         def judge(document: str) -> Verdict:
@@ -414,7 +414,7 @@ class Repair(Logged):
         self.assertIn("approved", (run / "response.txt").read_text())
 
     def test_the_repair_budget_runs_out(self):
-        model = StubModel("nope", "still nope")
+        model = StubProvider("nope", "still nope")
 
         @prompt(model=model, log_dir=self.tmp)
         def judge(document: str) -> Verdict:
@@ -429,7 +429,7 @@ class Repair(Logged):
         self.assertFalse((run / "response.txt").exists())
 
     def test_no_repair_budget_fails_on_the_first_response(self):
-        model = StubModel("nope", '{"approved": true, "reasons": []}')
+        model = StubProvider("nope", '{"approved": true, "reasons": []}')
 
         @prompt(model=model, log_dir=self.tmp, max_repairs=0)
         def judge(document: str) -> Verdict:

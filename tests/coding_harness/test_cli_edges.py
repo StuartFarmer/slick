@@ -13,9 +13,9 @@ from examples.coding_harness import workspace as workspace_module
 from examples.coding_harness.state import RunResult
 
 
-def real_backend_args(root):
+def real_provider_args(root):
     return [
-        "--backend",
+        "--provider",
         "openai",
         "--model",
         "offline-test",
@@ -35,21 +35,21 @@ def test_missing_workspace_executable_fails_before_model_use(repo, monkeypatch, 
         "which",
         lambda executable: None if executable == missing else original(executable),
     )
-    # Initialization must fail before the backend needs even an identity/model call.
-    monkeypatch.setattr(cli, "OpenAI", lambda **kwargs: object())
+    # Initialization must fail before the provider needs even an identity/model call.
+    monkeypatch.setattr(cli, "OpenAIAPI", lambda **kwargs: object())
     before = (repo / "sample.py").read_bytes()
-    assert cli.main(real_backend_args(repo)) == 1
+    assert cli.main(real_provider_args(repo)) == 1
     assert f"{missing} is required" in capsys.readouterr().err
     assert (repo / "sample.py").read_bytes() == before
 
 
-def test_missing_explicit_config_fails_without_constructing_backend(repo, monkeypatch, capsys):
-    def forbidden_backend(**kwargs):
-        raise AssertionError("A missing config must fail before constructing a backend")
+def test_missing_explicit_config_fails_without_constructing_provider(repo, monkeypatch, capsys):
+    def forbidden_provider(**kwargs):
+        raise AssertionError("A missing config must fail before constructing a provider")
 
-    monkeypatch.setattr(cli, "OpenAI", forbidden_backend)
+    monkeypatch.setattr(cli, "OpenAIAPI", forbidden_provider)
     missing = repo / "missing-checks.json"
-    assert cli.main([*real_backend_args(repo), "--config", str(missing)]) == 1
+    assert cli.main([*real_provider_args(repo), "--config", str(missing)]) == 1
     error = capsys.readouterr().err
     assert "FileNotFoundError" in error and str(missing) in error
 
@@ -72,7 +72,7 @@ def test_unsupported_platform_fails_before_demo_creation(monkeypatch, capsys, os
 @pytest.mark.parametrize(
     "override",
     [
-        ["--backend", "demo"],
+        ["--provider", "demo"],
         ["--model", "test"],
         ["--workspace", "/unused"],
         ["--config", "/unused.json"],
@@ -126,7 +126,7 @@ def test_headless_maps_application_status_to_exit_code(tmp_path, monkeypatch, st
                 changed_paths=[],
             )
 
-    async def factory(backend, root, config, *, decide, emit, saved):
+    async def factory(provider, root, config, *, decide, emit, saved):
         assert await decide(None) == "deny"
         return FinishedAgent()
 
@@ -138,7 +138,7 @@ def test_headless_maps_application_status_to_exit_code(tmp_path, monkeypatch, st
 def test_demo_root_is_removed_when_execution_fails(monkeypatch, capsys, failure):
     roots = []
 
-    async def fail_after_real_setup(backend, root, config, task, saved):
+    async def fail_after_real_setup(provider, root, config, task, saved):
         roots.append(Path(root))
         assert (root / "pricing.py").is_file()
         assert (root / ".git").is_dir()

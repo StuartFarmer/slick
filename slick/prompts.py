@@ -2,8 +2,8 @@
 
 `Prompt(template)(**variables)` and `render(template, **variables)` only
 render text. `parse(text, returns)`
-only validates a result. `@prompt(backend=...)` composes rendering,
-backend.call/acall, and parsing without implicit persistence or repairs.
+only validates a result. `@prompt(provider=...)` composes rendering,
+provider.call/acall, and parsing without implicit persistence or repairs.
 Legacy model= declarations retain their original logging/cache defaults.
 """
 
@@ -23,7 +23,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateNotFo
 from jinja2 import Template as JinjaTemplate
 from pydantic import TypeAdapter, ValidationError
 
-from .models import Model, get_model
+from .providers import Provider, get_command
 
 TEMPLATE_ROOT = Path("prompts")
 LOG_DIR = Path("logs/prompts")
@@ -110,8 +110,8 @@ def prompt(
     fn: F,
     *,
     template: str | None = None,
-    model: Model | str | None = None,
-    backend: Any = None,
+    model: Provider | str | None = None,
+    provider: Any = None,
     max_repairs: int | None = None,
     cache: bool | None = None,
     log_dir: Path | str | None = None,
@@ -123,8 +123,8 @@ def prompt(
     fn: None = None,
     *,
     template: str | None = None,
-    model: Model | str | None = None,
-    backend: Any = None,
+    model: Provider | str | None = None,
+    provider: Any = None,
     max_repairs: int | None = None,
     cache: bool | None = None,
     log_dir: Path | str | None = None,
@@ -135,31 +135,31 @@ def prompt(
     fn: Callable | None = None,
     *,
     template: str | None = None,
-    model: Model | str | None = None,
-    backend: Any = None,
+    model: Provider | str | None = None,
+    provider: Any = None,
     max_repairs: int | None = None,
     cache: bool | None = None,
     log_dir: Path | str | None = None,
 ) -> Callable:
     """Declare a template-backed function using call (def) or acall (async def).
 
-    backend= accepts a configured text backend. Modern calls have no logging,
+    provider= accepts a configured text provider. Modern calls have no logging,
     cache or repair unless explicitly requested. Legacy synchronous model=
     declarations keep their original defaults. .render() follows the declared
-    sync/async mode and never calls the backend; a computed-context body runs.
+    sync/async mode and never calls the provider; a computed-context body runs.
     """
-    if backend is not None and model is not None:
-        raise PromptError("Choose either model= or backend=, not both.")
+    if provider is not None and model is not None:
+        raise PromptError("Choose either model= or provider=, not both.")
     if max_repairs is not None and (type(max_repairs) is not int or max_repairs < 0):
         raise PromptError("max_repairs must be a non-negative integer.")
     if cache is not None and not isinstance(cache, bool):
         raise PromptError("cache must be a boolean.")
     if fn is None:
-        return lambda inner: _build(inner, template, model, backend, max_repairs, cache, log_dir)
-    return _build(fn, template, model, backend, max_repairs, cache, log_dir)
+        return lambda inner: _build(inner, template, model, provider, max_repairs, cache, log_dir)
+    return _build(fn, template, model, provider, max_repairs, cache, log_dir)
 
 
-def _build(fn, template, model, backend, max_repairs, cache, log_dir):
+def _build(fn, template, model, provider, max_repairs, cache, log_dir):
     signature = inspect.signature(fn)
     clash = [name for name in RESERVED if name in signature.parameters]
     if clash:
@@ -180,25 +180,25 @@ def _build(fn, template, model, backend, max_repairs, cache, log_dir):
     returns = get_type_hints(fn).get("return", str)
     parser = None if returns is str else _Parser(returns)
     asynchronous = inspect.iscoroutinefunction(fn)
-    modern = backend is not None or asynchronous
+    modern = provider is not None or asynchronous
     use_cache = not modern if cache is None else cache
     repairs = (0 if modern else 1) if max_repairs is None else max_repairs
 
     def prepare(kwargs):
         override = kwargs.pop("model", None)
-        if backend is not None and override is not None:
-            raise PromptError("A backend= declaration does not accept a model= override.")
+        if provider is not None and override is not None:
+            raise PromptError("A provider= declaration does not accept a model= override.")
         output = kwargs.pop("output", None)
         if output is not None and parser is not None:
             raise PromptError(
                 f"{fn.__name__} returns {_name(returns)}, not str; "
                 "output= only saves text responses."
             )
-        selected = backend if backend is not None else _resolve(override or model)
+        selected = provider if provider is not None else _resolve(override or model)
         method = "acall" if asynchronous else "call"
         execute = getattr(selected, method, None)
         if not callable(execute):
-            raise PromptError(f"{fn.__name__}: backend must implement {method}(text).")
+            raise PromptError(f"{fn.__name__}: provider must implement {method}(text).")
         directory = (
             Path(log_dir) if log_dir is not None else (LOG_DIR if not modern or use_cache else None)
         )
@@ -343,7 +343,7 @@ _MISSING = object()
 class _Exchange:
     """Parsing and optional disk persistence shared by sync and async execution."""
 
-    def __init__(self, backend, text, parser, repairs, cache, directory, name, output, announce):
+    def __init__(self, provider, text, parser, repairs, cache, directory, name, output, announce):
         self.text = text
         self.parser = parser
         self.repairs = repairs
@@ -352,7 +352,7 @@ class _Exchange:
         self.output = output
         self.announce = announce
         self.directory = (
-            directory / f"{name}-{_digest(text, backend)}" if directory is not None else None
+            directory / f"{name}-{_digest(text, provider)}" if directory is not None else None
         )
 
     def write(self, filename, text):
@@ -373,7 +373,7 @@ class _Exchange:
 
     def value(self, text):
         if not isinstance(text, str):
-            raise PromptError(f"{self.name}: backend must return str, got {type(text).__name__}.")
+            raise PromptError(f"{self.name}: provider must return str, got {type(text).__name__}.")
         if self.parser is not None:
             return parse(text, self.parser.annotation)
         return _save(text, self.output, self.name)
@@ -442,10 +442,10 @@ def _json_slice(text: str) -> str:
     return text[start : end + 1] if end > start else text.strip()
 
 
-def _resolve(model: Model | str | None) -> Model:
+def _resolve(model: Provider | str | None) -> Provider:
     if model is None:
-        return get_model()
-    return get_model(model) if isinstance(model, str) else model
+        return get_command()
+    return get_command(model) if isinstance(model, str) else model
 
 
 def _digest(prompt_text: str, model) -> str:
@@ -456,14 +456,14 @@ def _digest(prompt_text: str, model) -> str:
             config = json.dumps(identity(), sort_keys=True, allow_nan=False)
         except (ValueError, TypeError) as exc:
             raise PromptError(
-                "backend.identity() must return JSON-serializable configuration."
+                "provider.identity() must return JSON-serializable configuration."
             ) from exc
         fingerprint = f"{prompt_text}\n{config}"
-    elif hasattr(model, "backend") and hasattr(model, "model"):
-        fingerprint = "\n".join([prompt_text, model.backend, model.model or ""])
+    elif hasattr(model, "provider") and hasattr(model, "model"):
+        fingerprint = "\n".join([prompt_text, model.provider, model.model or ""])
     else:
         raise PromptError(
-            "Logging/cache requires a backend identity() or legacy backend/model metadata."
+            "Logging/cache requires a provider identity() or legacy provider/model metadata."
         )
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12]
 

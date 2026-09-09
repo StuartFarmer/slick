@@ -51,8 +51,8 @@ class ScriptedProvider:
     def __init__(self, responses):
         self.responses = iter(responses)
 
-    async def acall(self, text: str) -> str:
+    async def acall(self, text: str, *, tools=None, tool_results=None):
         try:
-            return next(self.responses)
+            return next(self.responses), []
         except StopIteration as exc:
             raise RuntimeError("Demo response script exhausted") from exc

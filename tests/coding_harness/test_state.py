@@ -19,8 +19,8 @@ def test_defaults_and_independent_mutable_state():
         "context_hard_chars": 120000,
     }
     first, second = SessionState(), SessionState()
-    first.history.append("a")
-    assert second.history == []
+    first.context_notes.append("a")
+    assert second.context_notes == []
 
 
 @pytest.mark.parametrize(

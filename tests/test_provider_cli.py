@@ -23,7 +23,7 @@ def test_explicit_api_provider_receives_stdin_and_model(monkeypatch, capsys, tmp
 
     def factory(**kwargs):
         seen.append(kwargs)
-        return NS(call=lambda text: "answer:" + text)
+        return NS(call=lambda text: ("answer:" + text, []))
 
     monkeypatch.setattr(cli, cls, factory)
     monkeypatch.setattr("sys.stdin", StringIO("question\n"))
@@ -61,7 +61,7 @@ def test_omitted_provider_uses_legacy_resolution(monkeypatch, capsys):
 
     def get_command(provider, model):
         seen.append((provider, model))
-        return NS(call=lambda text: "legacy:" + text)
+        return NS(call=lambda text: ("legacy:" + text, []))
 
     monkeypatch.setattr(cli, "get_command", get_command)
     assert cli.main(["call", "prompt"]) == 0

@@ -12,7 +12,6 @@ import pytest
 from examples.coding_harness import __main__ as cli
 from examples.coding_harness.session import load_session, restore_session, save_session
 from slick.providers import ProviderError
-from slick.turns import ToolResult, UserMessage
 
 MODEL = "openrouter/openai/gpt-oss-120b:nitro"
 
@@ -49,7 +48,6 @@ def install_sdk(monkeypatch, responses, requests):
 def test_cli_litellm_executes_tools_and_returns_the_final_answer(repo, monkeypatch, capsys):
     requests = []
     first = reply(None, [tool_call()])
-    first["choices"][0]["message"]["reasoning_content"] = "Inspect the files first."
     install_sdk(monkeypatch, [first, reply("Workspace inspected.")], requests)
     assert (
         cli.main(
@@ -70,11 +68,11 @@ def test_cli_litellm_executes_tools_and_returns_the_final_answer(repo, monkeypat
     assert "Workspace inspected." in capsys.readouterr().out
     assert len(requests) == 2
     assert requests[0]["model"] == MODEL
-    assert requests[0]["messages"][0]["role"] == "system"
+    assert requests[0]["messages"][0]["role"] == "user"
     assert requests[0]["stream"] is False
     assert requests[0]["drop_params"] is False
     assert requests[0]["tools"][0]["type"] == "function"
-    assert requests[1]["messages"][-2] == first["choices"][0]["message"]
+    assert requests[1]["messages"][-2]["tool_calls"] == first["choices"][0]["message"]["tool_calls"]
     result = requests[1]["messages"][-1]
     assert result["role"] == "tool" and result["tool_call_id"] == "call-1"
     assert "sample.py" in result["content"]
@@ -105,7 +103,7 @@ def test_litellm_session_round_trip_preserves_history(repo, tmp_path, monkeypatc
         assert restored.state.model == MODEL
 
     asyncio.run(run())
-    assert any(message.get("content") == "First answer" for message in requests[1]["messages"])
+    assert any("First answer" in message.get("content", "") for message in requests[1]["messages"])
 
 
 @pytest.mark.parametrize(
@@ -127,7 +125,7 @@ def test_invalid_turns_fail_before_tool_execution(monkeypatch, response):
 
     install_sdk(monkeypatch, [response], [])
     with pytest.raises(ProviderError):
-        asyncio.run(LiteLLMProvider(MODEL).aturn([UserMessage("Go")], tools=[list_files]))
+        asyncio.run(LiteLLMProvider(MODEL).acall("Go", tools=[list_files]))
 
 
 def test_bad_arguments_are_recoverable_and_no_tools_are_allowed_in_summary(monkeypatch):
@@ -142,13 +140,14 @@ def test_bad_arguments_are_recoverable_and_no_tools_are_allowed_in_summary(monke
 
     async def run():
         provider = LiteLLMProvider(MODEL)
-        history = [UserMessage("Go")]
-        turn = await provider.aturn(history, tools=[list_files])
-        assert turn.tool_calls[0].argument_error
-        assert turn.input_tokens == 12 and turn.output_tokens == 3
-        assert history == [UserMessage("Go")]
-        await provider.aturn(
-            [*history, turn, ToolResult("call-1", "Invalid arguments", True)], tools=[]
+        text, requests = await provider.acall("Go", tools=[list_files])
+        assert requests[0]["argument_error"]
+        await provider.acall(
+            "New context",
+            tools=[],
+            tool_results=[
+                {"request": requests[0], "content": "Invalid arguments", "is_error": True},
+            ],
         )
 
     asyncio.run(run())
@@ -164,7 +163,7 @@ def test_provider_failures_do_not_expose_credentials(monkeypatch):
     monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(acompletion=fail))
     provider = LiteLLMProvider(MODEL, api_key="private-key")
     with pytest.raises(ProviderError) as caught:
-        asyncio.run(provider.aturn([UserMessage("Go")], tools=[]))
+        asyncio.run(provider.acall("Go", tools=[]))
     assert "private-key" not in str(caught.value)
     assert "private-key" not in json.dumps(provider.identity())
 
@@ -206,13 +205,16 @@ def test_real_sdk_sends_openrouter_key_model_and_tool_results(monkeypatch):
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
             monkeypatch.setattr(AsyncHTTPHandler, "create_client", lambda self, **kwargs: client)
             provider = LiteLLMProvider(MODEL)
-            history = [UserMessage("List files")]
-            turn = await provider.aturn(history, tools=[list_files], instructions="Inspect files.")
-            assert turn.tool_calls[0].name == "list_files"
-            final = await provider.aturn(
-                [*history, turn, ToolResult("call-1", '["sample.py"]')], tools=[list_files]
+            text, calls = await provider.acall("Inspect files. List files", tools=[list_files])
+            assert calls[0]["name"] == "list_files"
+            final = await provider.acall(
+                "Continue",
+                tools=[list_files],
+                tool_results=[
+                    {"request": calls[0], "content": '["sample.py"]'},
+                ],
             )
-            assert final.text == "Files checked."
+            assert final == ("Files checked.", [])
 
     asyncio.run(run())
     assert len(requests) == 2

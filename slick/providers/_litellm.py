@@ -8,10 +8,10 @@ from copy import deepcopy
 from dataclasses import KW_ONLY, dataclass, field
 from importlib import import_module
 
-from ..turns import ModelTurn, ToolResult, UserMessage, _chat_completions, validate_history
-from ..turns.tools import prepare_tools
-from ._api import _chat_text
+from ..tools._protocol import prepare_call
+from ._api import _decode
 from ._base import Provider, ProviderError
+from ._tools import _chat_completions
 
 _RESERVED_OPTIONS = {
     "model",
@@ -62,8 +62,9 @@ def _sdk():
 class LiteLLMAPI(Provider):
     """Provider-prefixed model access through the optional LiteLLM SDK.
 
-    Options are provider-specific inference settings. Calls do not configure
-    tools, streaming, fallback routing, or persistent conversation state.
+    Options are provider-specific inference settings. Tool definitions and results
+    are explicit call arguments. No automatic
+    execution, fallback routing, or persistent conversation state.
     """
 
     model: str
@@ -83,7 +84,7 @@ class LiteLLMAPI(Provider):
                 raise ValueError(f"{name} must be a nonempty string")
         if (
             isinstance(self.timeout, bool)
-            or not isinstance(self.timeout, (int, float))
+            or not isinstance(self.timeout, int | float)
             or not math.isfinite(self.timeout)
             or self.timeout <= 0
         ):
@@ -100,11 +101,12 @@ class LiteLLMAPI(Provider):
             raise ValueError("chatgpt/ does not enforce output token limits")
         self.options = deepcopy(self.options)
 
-    def _request(self, text):
+    def _request(self, context, tools, tool_results):
+        prepared, results = prepare_call(context, tools, tool_results)
         request = {
             **deepcopy(self.options),
             "model": self.model,
-            "messages": [{"role": "user", "content": text}],
+            **_chat_completions.encode_request(context, prepared, results),
             "timeout": self.timeout,
             "num_retries": self.max_retries,
             "drop_params": False,
@@ -115,19 +117,23 @@ class LiteLLMAPI(Provider):
             request["api_base"] = self.api_base
         if self.api_key is not None:
             request["api_key"] = self.api_key
-        return request
+        return request, prepared
 
-    def call(self, text: str) -> str:
+    def call(self, context: str, *, tools=None, tool_results=None):
         try:
-            return _chat_text(_sdk().completion(**self._request(text)), "LiteLLM")
+            request, prepared = self._request(context, tools, tool_results)
+            response = _sdk().completion(**request)
+            return _decode(_chat_completions, response, prepared)
         except ProviderError:
             raise
         except Exception as exc:
             raise ProviderError("LiteLLM request failed.") from exc
 
-    async def acall(self, text: str) -> str:
+    async def acall(self, context: str, *, tools=None, tool_results=None):
         try:
-            return _chat_text(await _sdk().acompletion(**self._request(text)), "LiteLLM")
+            request, prepared = self._request(context, tools, tool_results)
+            response = await _sdk().acompletion(**request)
+            return _decode(_chat_completions, response, prepared)
         except ProviderError:
             raise
         except Exception as exc:
@@ -135,31 +141,3 @@ class LiteLLMAPI(Provider):
 
     def identity(self) -> dict:
         return {"provider": "litellm", "model": self.model}
-
-    async def aturn(
-        self,
-        history: list[UserMessage | ModelTurn | ToolResult],
-        *,
-        tools: list,
-        instructions: str = "",
-    ) -> ModelTurn:
-        """Make one Chat Completions turn without executing tools."""
-        try:
-            prepared = prepare_tools(tools)
-            validate_history(history, provider="litellm", model=self.model)
-            request = self._request("")
-            request["messages"] = _chat_completions.encode_history(
-                history, instructions=instructions
-            )
-            if prepared:
-                request["tools"] = _chat_completions.tool_definitions(prepared)
-            response = await _sdk().acompletion(**request)
-            raw = response.model_dump(mode="json", exclude_none=True)
-            turn = _chat_completions.decode_turn(raw, provider="litellm", model=self.model)
-            if turn.tool_calls and not prepared:
-                raise ValueError("LiteLLM returned tool calls with no tools available")
-            return turn
-        except ProviderError:
-            raise
-        except Exception as exc:
-            raise ProviderError("LiteLLM native turn failed.") from exc

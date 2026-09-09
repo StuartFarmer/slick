@@ -42,7 +42,7 @@ async def run(provider) -> dict:
     question = "How can I supply history?"
     documents = await search_documents(question)
     text = render("answer.j2", question=question, documents=documents)
-    retrieval = await provider.acall(text)
+    retrieval, _ = await provider.acall(text)
     return {"summary": summary, "conversation": conversation, "retrieval": retrieval}
 
 
@@ -58,8 +58,8 @@ class DemoProvider:
             ]
         )
 
-    async def acall(self, text: str) -> str:
-        return next(self.responses)
+    async def acall(self, text: str):
+        return next(self.responses), []
 
 
 if __name__ == "__main__":

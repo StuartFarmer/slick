@@ -32,7 +32,8 @@ class ReasoningSolver:
             demonstrations=self.demonstrations,
             schema=Solution.model_json_schema(),
         )
-        solution = parse(await self.provider.acall(text), Solution)
+        response, _ = await self.provider.acall(text)
+        solution = parse(response, Solution)
         self.solution = solution
         return solution
 

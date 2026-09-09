@@ -12,6 +12,7 @@ example independently:
 | --- | --- | --- |
 | Shared context primitives | `python -m examples.primitives` | Render all seven parts without a provider |
 | Conversation | `python -m examples.question_answerer --critique` | `QuestionAnswerer.ask`, `critique`; instance-owned history |
+| Automatic Session | `python -m examples.session` | Registered Python tools, automatic recording and result submission |
 | Few-shot | `python -m examples.few_shot` | `FewShotAnswerer.ask`; classify using input/output examples |
 | Chain-of-thought | `python -m examples.chain_of_thought` | `ReasoningSolver.solve`; worked examples and a concise, checkable explanation |
 | Retrieval-grounded answering | `python -m examples.rag` | `GroundedAnswerer.retrieve`, `ask`; local retrieval and cited answers |
@@ -96,7 +97,7 @@ feedback = await writer.critique()
 answer = await writer.revise()
 ```
 
-Here `provider` is any object with `async acall(text) -> str`. A prompt stores only
+Here `provider` is any object with `async acall(context) -> tuple[str, list[dict]]`. A prompt stores only
 its template filename; the class decides when to render and execute it. Instances
 are intended for sequential use, and their state stays in memory. A new CLI
 invocation starts a new instance.

@@ -99,10 +99,10 @@ def _validate_args(parser, args):
     if args.task and not args.headless:
         parser.error("--task requires --headless; use the input box interactively")
     if args.resume:
-        if any([args.provider, args.dry_run, args.model, args.workspace, args.config]):
+        if any([args.dry_run, args.workspace, args.config]):
             parser.error(
                 "--resume cannot be combined with --dry-run or "
-                "provider/model/workspace/config overrides"
+                "workspace/config overrides"
             )
         return
     args.provider = "demo" if args.dry_run else (args.provider or "openai")
@@ -120,8 +120,10 @@ def main(argv=None):
     prompts.TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "prompts"
     try:
         saved = load_session(args.resume) if args.resume else None
-        provider = saved.provider if saved else args.provider
-        model = saved.model if saved else args.model
+        provider = (args.provider or saved.provider) if saved else args.provider
+        if saved and provider != saved.provider and not args.model:
+            parser.error("Changing the resumed provider requires --model")
+        model = (args.model or saved.model) if saved else args.model
         context = (
             TemporaryDirectory(prefix="slick-coding-demo-")
             if provider == "demo" and not saved

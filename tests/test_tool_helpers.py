@@ -7,7 +7,7 @@ from typing import Annotated
 import pytest
 from pydantic import BaseModel, Field, TypeAdapter
 
-from slick import tools
+from slick.tools import _functions as tools
 
 
 class Request(BaseModel):

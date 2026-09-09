@@ -25,7 +25,8 @@ class FewShotAnswerer:
             demonstrations=self.demonstrations,
             schema=TypeAdapter(Sentiment).json_schema(),
         )
-        answer = parse(await self.provider.acall(text), Sentiment)
+        response, _ = await self.provider.acall(text)
+        answer = parse(response, Sentiment)
         self.answer = answer
         return answer
 

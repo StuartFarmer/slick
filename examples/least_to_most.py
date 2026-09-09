@@ -38,7 +38,8 @@ class LeastToMost:
             limit=self.max_subproblems,
             schema=Decomposition.model_json_schema(),
         )
-        plan = parse(await self.provider.acall(text), Decomposition)
+        response, _ = await self.provider.acall(text)
+        plan = parse(response, Decomposition)
         if len(plan.subproblems) > self.max_subproblems:
             raise ValueError("decomposition exceeds max_subproblems")
         self.subproblems = plan.subproblems
@@ -59,7 +60,8 @@ class LeastToMost:
             solutions=self.solutions,
             schema=Answer.model_json_schema(),
         )
-        result = parse(await self.provider.acall(text), Answer)
+        response, _ = await self.provider.acall(text)
+        result = parse(response, Answer)
         self.solutions.append({"input": question, "output": result.answer})
         if index == len(self.subproblems):
             self.answer = result.answer

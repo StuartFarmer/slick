@@ -2,9 +2,9 @@
 
 import asyncio
 import sys
-from types import SimpleNamespace as NS
 
 import pytest
+from sdk_fakes import JsonNamespace as NS
 from test_api_providers import Client
 
 from slick.providers import ProviderError
@@ -20,7 +20,9 @@ class ChatClient(Client):
 
 
 def reply(finish="stop", content="  answer\n", **message):
-    return NS(choices=[NS(finish_reason=finish, message=NS(content=content, **message))])
+    return NS(
+        choices=[NS(finish_reason=finish, message=NS(role="assistant", content=content, **message))]
+    )
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -42,7 +44,7 @@ def test_openrouter_routes_and_authenticates_at_call_time(monkeypatch, asynchron
     provider = OpenRouterAPI("vendor/model", timeout=12.5, max_output_tokens=123, **injected)
     monkeypatch.setenv("OPENROUTER_API_KEY", "router-key")
     answer = asyncio.run(provider.acall("input\n")) if asynchronous else provider.call("input\n")
-    assert answer == "  answer\n"
+    assert answer == ("  answer\n", [])
     assert len(seen) == 1
     state = seen[0].state
     assert len(state["requests"]) == 1
@@ -68,56 +70,7 @@ def test_openrouter_routes_and_authenticates_at_call_time(monkeypatch, asynchron
         "max_output_tokens": 123,
         "max_retries": 0,
     }
-    assert hasattr(provider, "aturn")
-
-
-def test_openrouter_native_turn_uses_shared_chat_codec():
-    import asyncio
-
-    from slick.providers import OpenRouterAPI
-    from slick.turns import ToolResult, UserMessage
-
-    response = {
-        "choices": [
-            {
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": "Searching.",
-                    "tool_calls": [
-                        {
-                            "id": "call-1",
-                            "type": "function",
-                            "function": {"name": "search", "arguments": '{"query":"x"}'},
-                        }
-                    ],
-                },
-            }
-        ],
-        "usage": {"prompt_tokens": 2, "completion_tokens": 1},
-    }
-    client = ChatClient(NS(model_dump=lambda **kwargs: response), asynchronous=True)
-
-    def search(query: str) -> str:
-        """Search documents."""
-        return query
-
-    provider = OpenRouterAPI("vendor/model", api_key="offline", async_client=client)
-    turn = asyncio.run(provider.aturn([UserMessage("Search")], tools=[search]))
-    assert turn.tool_calls[0].name == "search"
-    assert client.state["requests"][0][1]["tools"][0]["function"]["name"] == "search"
-
-    response["choices"][0] = {
-        "finish_reason": "stop",
-        "message": {"role": "assistant", "content": "Done", "tool_calls": None},
-    }
-    asyncio.run(
-        provider.aturn(
-            [UserMessage("Search"), turn, ToolResult("call-1", "result")],
-            tools=[search],
-        )
-    )
-    assert client.state["requests"][1][1]["messages"][-1]["tool_call_id"] == "call-1"
+    assert not hasattr(provider, "aturn")
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])

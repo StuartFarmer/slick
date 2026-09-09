@@ -72,9 +72,7 @@ def test_unsupported_platform_fails_before_demo_creation(monkeypatch, capsys, os
 @pytest.mark.parametrize(
     "override",
     [
-        ["--provider", "openai"],
         ["--dry-run"],
-        ["--model", "test"],
         ["--workspace", "/unused"],
         ["--config", "/unused.json"],
     ],
@@ -177,3 +175,53 @@ def test_default_provider_uses_openai_for_live_workspace(repo, monkeypatch, caps
     monkeypatch.setattr(cli, "OpenAIAPI", unavailable_provider)
     assert cli.main(real_provider_args(repo)[2:]) == 1
     assert "OpenAI unavailable in offline test" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "provider_name,model", [(None, None), (None, "new-model"), ("anthropic", "new-model")]
+)
+def test_resume_selects_provider_and_model(repo, tmp_path, monkeypatch, provider_name, model):
+    from examples.coding_harness.agent import CodingAgent
+    from examples.coding_harness.session import save_session
+    from examples.coding_harness.state import HarnessConfig
+    from tests.coding_harness.test_session import FakeProvider
+
+    async def setup():
+        workspace = workspace_module.Workspace(repo, checks=[], decide=cli.deny)
+        await workspace.initialize()
+        agent = CodingAgent(FakeProvider(), workspace, HarnessConfig())
+        agent.state.provider = "openai"
+        agent.state.model = "old-model"
+        agent.state.fingerprint = await workspace.fingerprint()
+        return agent
+
+    path = tmp_path.parent / (tmp_path.name + "-resume.json")
+    save_session(path, asyncio.run(setup()))
+    selected = []
+
+    def build(name):
+        def factory(*, model):
+            selected.append((name, model))
+            return FakeProvider(("Done", []))
+
+        return factory
+
+    monkeypatch.setattr(cli, "OpenAIAPI", build("openai"))
+    monkeypatch.setattr(cli, "AnthropicAPI", build("anthropic"))
+    args = ["--resume", str(path), "--headless", "--task", "Continue"]
+    if provider_name:
+        args += ["--provider", provider_name]
+    if model:
+        args += ["--model", model]
+    assert cli.main(args) == 2  # No configured checks: unverified.
+    assert selected == [(provider_name or "openai", model or "old-model")]
+
+
+def test_changing_resume_provider_requires_explicit_model(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli, "load_session", lambda path: SimpleNamespace(provider="openai", model="old")
+    )
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(["--resume", str(tmp_path / "saved.json"), "--provider", "anthropic"])
+    assert stopped.value.code == 2
+    assert "--model" in capsys.readouterr().err

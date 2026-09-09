@@ -64,7 +64,8 @@ class ReflectiveSolver:
             state={"facts": CRITERIA, "decisions": self.lessons, "questions": []},
             schema=Candidate.model_json_schema(),
         )
-        return parse(await self.provider.acall(text), Candidate)
+        response, _ = await self.provider.acall(text)
+        return parse(response, Candidate)
 
     def evaluate(self, candidate: Candidate) -> Feedback:
         """Compute feedback in Python; the model cannot declare its own success."""
@@ -93,7 +94,8 @@ class ReflectiveSolver:
             lessons=self.lessons,
             schema=Reflection.model_json_schema(),
         )
-        reflection = parse(await self.provider.acall(text), Reflection)
+        response, _ = await self.provider.acall(text)
+        reflection = parse(response, Reflection)
         self.lessons.append(reflection.lesson)
         return reflection
 

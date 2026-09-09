@@ -5,7 +5,7 @@ import pytest
 from examples.coding_harness.agent import CodingAgent
 from examples.coding_harness.context import context_size, render_instructions
 from examples.coding_harness.state import HarnessConfig
-from slick.turns import ModelTurn, ToolCall, UserMessage
+from slick import Session
 
 
 class SummaryProvider:
@@ -15,9 +15,9 @@ class SummaryProvider:
     def identity(self):
         return {"provider": "demo", "model": "scripted"}
 
-    async def aturn(self, history, *, tools, instructions=""):
+    async def acall(self, context, *, tools=None, tool_results=""):
         assert tools == []
-        return ModelTurn("demo", "scripted", self.answer, [], [], "end_turn")
+        return (self.answer, [])
 
 
 def test_compaction_swaps_complete_history_only_after_validation(workspace):
@@ -26,58 +26,43 @@ def test_compaction_swaps_complete_history_only_after_validation(workspace):
         '"modified_files":[],"next_steps":[]}'
     )
     agent = CodingAgent(provider, workspace, HarnessConfig(skills=["python"]))
-    agent.state.history = [UserMessage("Keep the API stable")]
+    agent.state.context_notes = [{"after": 0, "role": "user", "text": "Keep the API stable"}]
     asyncio.run(agent.compact())
     assert len(agent.state.archived_histories) == 1
-    assert "API uses integers" in agent.state.history[0].text
+    assert "API uses integers" in agent.state.context_notes[0]["text"]
     assert "Python" in render_instructions(workspace, agent.config)
 
 
 def test_bad_summary_preserves_history(workspace):
     agent = CodingAgent(SummaryProvider("not JSON"), workspace, HarnessConfig())
-    agent.state.history = [UserMessage("Keep me")]
-    before = list(agent.state.history)
+    agent.state.context_notes = [{"after": 0, "role": "user", "text": "Keep me"}]
+    before = list(agent.state.context_notes)
     with pytest.raises(ValueError):
         asyncio.run(agent.compact())
-    assert agent.state.history == before
+    assert agent.state.context_notes == before
     assert not agent.state.archived_histories
 
 
-def test_pending_calls_cannot_compact(workspace):
-    agent = CodingAgent(SummaryProvider("unused"), workspace, HarnessConfig())
-    agent.state.history = [
-        UserMessage("Read"),
-        ModelTurn(
-            "demo", "scripted", "", [ToolCall("a", "read_file", {"path": "a.py"})], [], "tool_calls"
-        ),
-    ]
-    with pytest.raises(ValueError):
-        asyncio.run(agent.compact())
-
-
-def test_context_size_counts_instructions_and_opaque_items():
-    history = [
-        UserMessage("hi"),
-        ModelTurn("demo", "scripted", "ok", [], [{"encrypted_content": "x" * 1000}], "end_turn"),
-    ]
-    assert context_size(history, instructions="rule", tools=[]) > 1000
+def test_context_size_counts_supplied_context_and_results():
+    results = [{"request": {"id": "a", "name": "read", "arguments": {}}, "content": "x" * 1000}]
+    assert context_size("rule", tools=[], tool_results=results) > 1000
 
 
 def test_manual_compaction_blocks_a_concurrent_run(workspace):
     async def scenario():
-        started, release = asyncio.Event(), asyncio.Event()
+        started, release = (asyncio.Event(), asyncio.Event())
 
         class WaitingSummary(SummaryProvider):
-            async def aturn(self, *args, **kwargs):
+            async def acall(self, *args, **kwargs):
                 started.set()
                 await release.wait()
-                return await super().aturn(*args, **kwargs)
+                return await super().acall(*args, **kwargs)
 
         provider = WaitingSummary(
             '{"facts":[],"decisions":[],"open_questions":[],"modified_files":[],"next_steps":[]}'
         )
         agent = CodingAgent(provider, workspace, HarnessConfig())
-        agent.state.history = [UserMessage("old context")]
+        agent.state.context_notes = [{"after": 0, "role": "user", "text": "old context"}]
         task = asyncio.create_task(agent.compact())
         try:
             await asyncio.wait_for(started.wait(), 2)
@@ -96,10 +81,10 @@ def test_summary_transport_failure_below_hard_limit_keeps_working(workspace):
     from slick.providers import ProviderError
 
     class SummaryFailure(SummaryProvider):
-        async def aturn(self, history, *, tools, instructions=""):
+        async def acall(self, context, *, tools=None, tool_results=""):
             if not tools:
                 raise ProviderError("summary request unavailable")
-            return ModelTurn("demo", "scripted", "Completed normally", [], [], "end_turn")
+            return ("Completed normally", [])
 
     agent = CodingAgent(
         SummaryFailure(""),
@@ -116,15 +101,13 @@ def test_oversized_pinned_context_stops_before_any_request(workspace):
     from examples.coding_harness.state import Limits
 
     class NoRequests(SummaryProvider):
-        async def aturn(self, *args, **kwargs):
+        async def acall(self, *args, **kwargs):
             pytest.fail("oversized pinned input must not reach the provider")
 
     agent = CodingAgent(
         NoRequests(""),
         workspace,
-        HarnessConfig(
-            limits=Limits(context_soft_chars=100, context_hard_chars=200),
-        ),
+        HarnessConfig(limits=Limits(context_soft_chars=100, context_hard_chars=200)),
     )
     result = asyncio.run(agent.run("A task with pinned context"))
     assert result.status == "blocked"
@@ -139,22 +122,32 @@ def test_unknown_skill_fails_before_execution(workspace):
 def test_bounded_summary_retains_complete_recent_exchange():
     from examples.coding_harness.context import summary_prompt
     from examples.coding_harness.state import Limits, SessionState
-    from slick.turns import ToolResult
 
     state = SessionState(
         task="Keep recent",
-        history=[
-            UserMessage("old user " * 1000),
-            ModelTurn(
-                "demo", "scripted", "OLD_ASSISTANT", [ToolCall("old", "read", {})], [], "tool_calls"
-            ),
-            ToolResult("old", "OLD_RESULT"),
-            UserMessage("RECENT_USER"),
-            ModelTurn("demo", "scripted", "RECENT_ASSISTANT", [], [], "end_turn"),
+        context_notes=[
+            {"after": 0, "role": "user", "text": "old user " * 1000},
+            {
+                "after": 0,
+                "role": "assistant",
+                "text": "OLD_ASSISTANT",
+                "calls": [{"id": "old", "name": "read", "arguments": {}}],
+            },
+            {
+                "after": 0,
+                "role": "tool",
+                "id": "old",
+                "text": "OLD_RESULT",
+                "error": False,
+            },
+            {"after": 0, "role": "user", "text": "RECENT_USER"},
+            {"after": 0, "role": "assistant", "text": "RECENT_ASSISTANT", "calls": []},
         ],
     )
     text = summary_prompt(
-        state, HarnessConfig(limits=Limits(context_soft_chars=4000, context_hard_chars=5000))
+        state,
+        HarnessConfig(limits=Limits(context_soft_chars=4000, context_hard_chars=5000)),
+        Session(),
     )
     assert "RECENT_USER" in text and "RECENT_ASSISTANT" in text
     assert "OLD_ASSISTANT" not in text and "OLD_RESULT" not in text

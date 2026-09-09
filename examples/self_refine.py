@@ -24,7 +24,7 @@ class SelfRefiner:
 
     async def draft(self):
         text = self.draft_prompt(task=self.task)
-        answer = await self.provider.acall(text)
+        answer, _ = await self.provider.acall(text)
         self.answer, self.feedback = answer, None
         self.revisions, self.feedback_history = [answer], []
         return answer
@@ -39,7 +39,7 @@ class SelfRefiner:
             revisions=self.revisions,
             feedback_history=self.feedback_history,
         )
-        self.feedback = await self.provider.acall(text)
+        self.feedback, _ = await self.provider.acall(text)
         return self.feedback
 
     async def revise(self):
@@ -52,7 +52,7 @@ class SelfRefiner:
             revisions=self.revisions,
             feedback_history=self.feedback_history,
         )
-        answer = await self.provider.acall(text)
+        answer, _ = await self.provider.acall(text)
         self.revisions.append(answer)
         self.feedback_history.append(self.feedback)
         self.answer, self.feedback = answer, None

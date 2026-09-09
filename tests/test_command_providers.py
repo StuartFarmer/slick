@@ -62,7 +62,7 @@ def test_calls_use_configured_workdir_and_execute_can_override(asynchronous):
     invoke("call", "fourth")
     assert model.runs[-1][2] == Path("/tmp/configured")
     plain = AsyncFake()
-    plain.call(prompt="legacy keyword")
+    plain.call("positional context")
     assert plain.runs[-1][2] is None
 
 
@@ -72,7 +72,7 @@ def test_configured_directory_reaches_the_child_process(tmp_path, asynchronous):
         [sys.executable, "-c", "import os; print(os.getcwd(), end='')"], workdir=tmp_path
     )
     result = asyncio.run(model.acall("prompt")) if asynchronous else model.call("prompt")
-    assert Path(result) == tmp_path.resolve()
+    assert Path(result[0]) == tmp_path.resolve()
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -89,12 +89,12 @@ def test_codex_relative_workdir_is_not_applied_twice(tmp_path, monkeypatch, asyn
     monkeypatch.chdir(tmp_path)
     model = CodexCLI(command=str(script), workdir="subdir")
     result = asyncio.run(model.acall("prompt")) if asynchronous else model.call("prompt")
-    assert Path(result) == workdir.resolve()
+    assert Path(result[0]) == workdir.resolve()
 
 
 class Call(unittest.TestCase):
     def test_returns_the_response_text(self):
-        self.assertEqual(FakeCommand().call("analyze this"), "report body")
+        self.assertEqual(FakeCommand().call("analyze this"), ("report body", []))
 
     def test_execute_reports_both_the_final_message_and_the_transcript(self):
         result = FakeCommand().execute("analyze this")
@@ -116,7 +116,7 @@ class Call(unittest.TestCase):
     def test_an_empty_response_is_returned_as_is(self):
         # Deciding what an empty response means is the caller's job; @prompt
         # refuses to save one, but Command just reports what it got.
-        self.assertEqual(FakeCommand(transcript="").call("analyze this"), "")
+        self.assertEqual(FakeCommand(transcript="").call("analyze this"), ("", []))
 
 
 class Subprocess(unittest.TestCase):
@@ -135,7 +135,7 @@ class Subprocess(unittest.TestCase):
     def test_stdout_is_captured_and_stdin_is_the_prompt(self):
         echo = "import sys; sys.stdout.write(sys.stdin.read())"
         model = self.RealCommand([sys.executable, "-c", echo])
-        self.assertEqual(model.call("echoed prompt"), "echoed prompt")
+        self.assertEqual(model.call("echoed prompt"), ("echoed prompt", []))
 
     def test_a_nonzero_exit_raises_with_the_detail(self):
         model = self.RealCommand(
@@ -207,7 +207,7 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
         model = Subprocess.RealCommand(
             [sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read())"]
         )
-        self.assertEqual(await model.acall("echoed café"), "echoed café")
+        self.assertEqual(await model.acall("echoed café"), ("echoed café", []))
 
     async def test_execute_preserves_workdir_and_sandbox(self):
         class AsyncFake(FakeCommand):

@@ -72,7 +72,8 @@ class ThoughtSearch:
             breadth=self.breadth,
             schema=Expansion.model_json_schema(),
         )
-        expansion = parse(await self.provider.acall(text), Expansion)
+        response, _ = await self.provider.acall(text)
+        expansion = parse(response, Expansion)
         if len(expansion.candidates) > self.breadth:
             raise ValueError("expansion exceeds breadth")
         return [
@@ -87,7 +88,8 @@ class ThoughtSearch:
             criteria=["Satisfies the problem constraints", "Can lead to a correct complete answer"],
             schema=Evaluation.model_json_schema(),
         )
-        evaluation = parse(await self.provider.acall(text), Evaluation)
+        response, _ = await self.provider.acall(text)
+        evaluation = parse(response, Evaluation)
         return replace(node, score=evaluation.score)
 
     def select(self, candidates: list[ThoughtState]) -> list[ThoughtState]:

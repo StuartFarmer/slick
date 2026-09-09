@@ -1,0 +1,12 @@
+{{ instructions }}
+
+{% for item in history %}
+{{ item.role }}:
+{{ item.text }}
+{% if item.calls is defined and item.calls %}
+Tool requests: {{ item.calls | tojson }}
+{% endif %}
+{% if item.role == "tool" %}
+Request ID: {{ item.id }}{% if item.error %} (error){% endif %}
+{% endif %}
+{% endfor %}

@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from slick.turns import ModelTurn, ToolCall, ToolResult, UserMessage, validate_history
+from slick.tools._protocol import make_request
 
 from .state import Check, HarnessConfig
 
@@ -75,16 +75,13 @@ class DemoProvider:
         return {"provider": "demo", "model": self.model}
 
     def _turn(self, text, calls=()):
-        return ModelTurn(
-            "demo", self.model, text, list(calls), [], "tool_calls" if calls else "end_turn"
-        )
+        return text, list(calls)
 
     def _call(self, name, arguments):
         self._number += 1
-        return ToolCall(f"demo_{self._number}", name, arguments)
+        return make_request(f"demo_{self._number}", name, arguments)
 
-    async def aturn(self, history, *, tools, instructions=""):
-        validate_history(history, provider="demo", model=self.model)
+    async def acall(self, context, *, tools=None, tool_results=None):
         if not tools:
             return self._turn(
                 json.dumps(
@@ -108,19 +105,16 @@ class DemoProvider:
             )
         if source not in {BROKEN, PARTIAL}:
             raise RuntimeError("Demo fixture changed unexpectedly; start a fresh demo")
-        previous = next((item for item in reversed(history) if isinstance(item, ToolResult)), None)
-        if self._read is None or previous is None or previous.call_id != self._read.id:
+        previous = (tool_results or [None])[-1]
+        if self._read is None or previous is None or previous["request"]["id"] != self._read["id"]:
             if source == PARTIAL:
-                feedback = [item.text for item in history if isinstance(item, UserMessage)]
-                if not any(
-                    "Verification: failed" in text and "exit_code: 1" in text for text in feedback
-                ):
+                if "Verification: failed" not in context or "exit_code: 1" not in context:
                     raise RuntimeError("Demo expected a real failed verification before repair")
             self._read = self._call("read_file", {"path": "pricing.py"})
             return self._turn("I'll inspect the current implementation.", [self._read])
-        if previous.is_error:
-            raise RuntimeError("Demo read failed: " + previous.content)
-        observation = json.loads(previous.content)
+        if previous["is_error"]:
+            raise RuntimeError("Demo read failed: " + previous["content"])
+        observation = json.loads(previous["content"])
         digest = hashlib.sha256(source.encode()).hexdigest()
         if observation["sha256"] != digest:
             raise RuntimeError("Demo observation is stale")

@@ -1,8 +1,8 @@
-"""CLI providers: one prompt in, one text response out.
+"""CLI providers: one prompt in, (final text, []) out.
 
     provider = get_command()                  # the resolved default provider
     provider = get_command("claude")          # or by name
-    report = provider.call(prompt)          # -> str
+    report, requests = provider.call(prompt)  # requests == []
 
 CLI providers (Claude Code headless, codex exec) use the invoked CLI's
 authentication and billing configuration. Give a provider everything it
@@ -28,6 +28,7 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..tools._protocol import prepare_call
 from ._base import Provider, ProviderError
 
 DEFAULT_CODEX_BIN = "codex"
@@ -65,13 +66,23 @@ class Command(Provider):
         self.timeout = timeout
         self.workdir = Path(workdir) if workdir is not None else None
 
-    def call(self, prompt: str) -> str:
-        """Single call with complete context, returning the response text."""
-        return self.execute(prompt, sandbox="read-only").final_message
+    def _validate_call(self, context, tools, tool_results):
+        try:
+            prepared, results = prepare_call(context, tools, tool_results)
+            if prepared or results:
+                raise ValueError("Command providers do not support Python tools or tool results")
+        except (ValueError, TypeError) as exc:
+            raise ProviderError(str(exc)) from exc
 
-    async def acall(self, prompt: str) -> str:
-        """Single native async call, returning the response text."""
-        return (await self.aexecute(prompt, sandbox="read-only")).final_message
+    def call(self, context: str, *, tools=None, tool_results=None):
+        """Run the CLI and return (final text, [])."""
+        self._validate_call(context, tools, tool_results)
+        return self.execute(context, sandbox="read-only").final_message, []
+
+    async def acall(self, context: str, *, tools=None, tool_results=None):
+        """Run the CLI asynchronously and return (final text, [])."""
+        self._validate_call(context, tools, tool_results)
+        return (await self.aexecute(context, sandbox="read-only")).final_message, []
 
     def execute(
         self,

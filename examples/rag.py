@@ -39,7 +39,8 @@ class GroundedAnswerer:
         text = self.prompt(
             question=question, documents=documents, schema=GroundedAnswer.model_json_schema()
         )
-        answer = parse(await self.provider.acall(text), GroundedAnswer)
+        response, _ = await self.provider.acall(text)
+        answer = parse(response, GroundedAnswer)
         if not set(answer.citations) <= {document["id"] for document in documents}:
             raise ValueError("Answer contains a citation outside the retrieved evidence")
         self.evidence, self.answer = documents, answer

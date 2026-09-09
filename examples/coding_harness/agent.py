@@ -2,14 +2,20 @@
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
-from slick import Prompt, ToolError, parse
+from slick import Prompt, Session, parse
 from slick.providers import ProviderError
-from slick.tools import prepare_tools
-from slick.turns import ToolResult, UserMessage, validate_history
+from slick.tools._protocol import validate_response
 
-from .context import context_size, render_instructions, summary_prompt
+from .context import (
+    context_size,
+    history_views,
+    render_context,
+    render_instructions,
+    summary_prompt,
+)
 from .state import ContextSummary, HarnessEvent, RunResult, SessionState
 from .verification import render_verification, verify
 
@@ -29,8 +35,9 @@ class CodingAgent:
             root=str(workspace.root),
             head=workspace.head,
         )
-        self.tools = prepare_tools(
-            [
+        self.session = Session(
+            provider=provider,
+            tools=[
                 workspace.list_files,
                 workspace.search,
                 workspace.read_file,
@@ -38,16 +45,18 @@ class CodingAgent:
                 workspace.create_file,
                 workspace.run_command,
                 workspace.git_diff,
-            ]
+            ],
         )
         self._compacted_last = False
         render_instructions(workspace, config)
 
+    def _note(self, text):
+        self.state.context_notes.append(
+            {"after": len(self.session.history), "role": "user", "text": text}
+        )
+
     def _event(self, kind, **data):
         self.emit(HarnessEvent(kind, data))
-
-    def _history_valid(self, history):
-        validate_history(history, provider=self.state.provider, model=self.state.model)
 
     def _result(self, status, answer, checks=(), changed_paths=None):
         paths = (
@@ -131,23 +140,23 @@ class CodingAgent:
 
     async def _run(self, task):
         self._event("user", text=task)
-        self.state.history.append(UserMessage(Prompt("coding_harness/task.j2")(task=task)))
+        self._note(Prompt("coding_harness/task.j2")(task=task))
         self.state.baseline = await self._checks(baseline=True)
         previous_failure = None
         while True:
-            turn = await self.step()
-            if turn.tool_calls:
+            text, requests = await self.step()
+            if requests:
                 continue
             verification = await self._checks()
             feedback = render_verification(verification, self.state.baseline)
-            self.state.history.append(UserMessage(feedback))
+            self._note(feedback)
             changed = await self.workspace.changed_paths()
             if not self.config.checks:
-                return self._result("unverified", turn.text, changed_paths=changed)
+                return self._result("unverified", text, changed_paths=changed)
             fresh = verification.fingerprint == await self.workspace.fingerprint()
             if verification.passed and verification.stable and fresh:
                 self.state.fingerprint = verification.fingerprint
-                return self._result("verified", turn.text, verification.results, changed)
+                return self._result("verified", text, verification.results, changed)
             failure = (
                 verification.fingerprint,
                 json.dumps(
@@ -173,97 +182,62 @@ class CodingAgent:
             self.state.repairs += 1
             self._event("status", text=f"Repair {self.state.repairs}: checks need attention")
 
-    async def _context(self):
-        instructions = render_instructions(self.workspace, self.config)
-        size = context_size(
-            self.state.history, instructions=instructions, tools=list(self.tools.values())
+    def _size(self, state=None):
+        state = self.state if state is None else state
+        return context_size(
+            render_context(self.workspace, self.config, state, self.session),
+            tools=self.session.tools,
+            tool_results=self.session.ready_results,
         )
+
+    async def _context(self):
+        size = self._size()
         limits = self.config.limits
         if size > limits.context_soft_chars and not self._compacted_last:
             try:
                 await self._compact()
             except (ValueError, RuntimeError, ProviderError) as error:
                 self._event("status", text=f"Context summary failed: {error}")
-            size = context_size(
-                self.state.history, instructions=instructions, tools=list(self.tools.values())
-            )
+            size = self._size()
         if size > limits.context_hard_chars:
             raise RunStopped("Context exceeds the input-size limit; start a new conversation")
-        return instructions
+        return render_context(self.workspace, self.config, self.state, self.session)
 
     async def step(self):
-        instructions = await self._context()
+        # A restored session may have work that has not started yet.
+        await self._execute_calls(self.session.pending_requests)
+        context = await self._context()
         self._request_budget()
         self._event("status", text="Waiting for model")
-        turn = await self.provider.aturn(
-            self.state.history, tools=list(self.tools.values()), instructions=instructions
-        )
-        placeholders = [ToolResult(call.id, "pending") for call in turn.tool_calls]
-        self._history_valid([*self.state.history, turn, *placeholders])
-        self.state.history.append(turn)
+        text, requests = await self.session.acall(context, provider=self.provider)
         self._compacted_last = False
-        if turn.text:
-            usage = {
-                key: value
-                for key, value in (
-                    ("input_tokens", turn.input_tokens),
-                    ("output_tokens", turn.output_tokens),
-                )
-                if value is not None
-            }
-            self._event("assistant", text=turn.text, usage=usage)
-        await self._execute_calls(turn.tool_calls)
-        return turn
+        if text:
+            self._event("assistant", text=text)
+        await self._execute_calls(requests)
+        return text, requests
 
     async def _execute_calls(self, calls):
-        completed = 0
-        started = False
         try:
             for call in calls:
                 if self.state.tool_calls >= self.config.limits.max_tool_calls:
                     raise RunStopped("Tool call budget exhausted")
                 self.state.tool_calls += 1
-                started = True
-                self._event("tool_started", id=call.id, name=call.name, arguments=call.arguments)
-                result = await self._dispatch(call)
-                self.state.history.append(result)
-                completed += 1
-                started = False
+                self._event(
+                    "tool_started", id=call["id"], name=call["name"], arguments=call["arguments"]
+                )
+                result = await self.session.resolve(call)
                 self._event(
                     "tool_finished",
-                    id=call.id,
-                    name=call.name,
-                    content=result.content,
-                    is_error=result.is_error,
+                    id=call["id"],
+                    name=call["name"],
+                    content=result["content"],
+                    is_error=result["is_error"],
                 )
         except BaseException:
-            # Close the group even when the interrupted action's effects are unknown.
-            for index, call in enumerate(calls[completed:]):
-                detail = (
-                    "Interrupted; effects may have occurred. Inspect current state."
-                    if index == 0 and started
-                    else "Not started: run stopped."
-                )
-                self.state.history.append(ToolResult(call.id, detail, True))
+            self.session.cancel_pending("run stopped")
             raise
         finally:
             self.state.edit_ledger = list(self.workspace.edit_ledger)
-
-    async def _dispatch(self, call):
-        if call.argument_error or call.arguments is None:
-            return ToolResult(call.id, call.argument_error or "Arguments must be an object", True)
-        if call.name not in self.tools:
-            return ToolResult(call.id, f"Unknown tool: {call.name}", True)
-        try:
-            content = await self.tools[call.name].ainvoke(call.arguments)
-        except ToolError as error:
-            effects = (
-                "not executed"
-                if error.phase == "arguments"
-                else "effects may have occurred; inspect state"
-            )
-            return ToolResult(call.id, f"{error}; {effects}", True)
-        return ToolResult(call.id, content)
 
     async def compact(self):
         if self.state.running:
@@ -275,31 +249,31 @@ class CodingAgent:
             self.state.running = False
 
     async def _compact(self):
-        if not self.state.history:
+        if not history_views(self.session, self.state, include_ready=True):
             raise ValueError("No conversation to compact")
-        self._history_valid(self.state.history)
         self.state.edit_ledger = list(self.workspace.edit_ledger)
-        text = summary_prompt(self.state, self.config)
+        text = summary_prompt(self.state, self.config, self.session)
         self._request_budget()
-        response = await self.provider.aturn([UserMessage(text)], tools=[])
-        if response.tool_calls:
+        text, requests = validate_response(await self.provider.acall(text, tools=[]))
+        if requests:
             raise ValueError("Summary must not request tools")
-        summary = parse(response.text, ContextSummary)
+        summary = parse(text, ContextSummary)
         checkpoint = Prompt("coding_harness/checkpoint.j2")(
             task=self.state.task,
             summary=summary,
             checks=[check.model_dump() for check in self.config.checks],
         )
-        instructions = render_instructions(self.workspace, self.config)
-        history = [UserMessage(checkpoint)]
-        after = context_size(history, instructions=instructions, tools=list(self.tools.values()))
+        cursor = len(self.session.history)
+        notes = [{"after": cursor, "role": "user", "text": checkpoint}]
+        after = self._size(replace(self.state, context_notes=notes, context_start=cursor))
         if after > self.config.limits.context_hard_chars:
             raise ValueError("Summary exceeds the input-size limit")
-        before = context_size(
-            self.state.history, instructions=instructions, tools=list(self.tools.values())
+        before = self._size()
+        self.state.archived_histories.append(
+            history_views(self.session, self.state, include_ready=True)
         )
-        self.state.archived_histories.append(self.state.history)
-        self.state.history = history
+        self.state.context_notes = notes
+        self.state.context_start = cursor
         self._compacted_last = True
         self._event("compacted", before=before, after=after)
 
@@ -319,6 +293,7 @@ class CodingAgent:
             head=self.workspace.head,
             fingerprint=fingerprint,
         )
+        self.session = Session(provider=self.provider, tools=self.session.tools)
         self.workspace.edit_ledger.clear()
         self._compacted_last = False
         self._event("status", text="New conversation; workspace files preserved")

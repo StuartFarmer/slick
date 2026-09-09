@@ -76,7 +76,9 @@ def main(argv: list[str] | None = None) -> int:
             provider = api_providers[args.provider](**kwargs)
         else:
             provider = get_command(args.provider, args.model)
-        text = provider.call(prompt)
+        text, requests = provider.call(prompt)
+        if requests:
+            raise ValueError("The CLI expects final text; handle tool requests in Python.")
     except (ProviderError, KeyError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2

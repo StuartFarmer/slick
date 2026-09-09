@@ -6,8 +6,7 @@ import pytest
 
 from examples.coding_harness.agent import CodingAgent
 from examples.coding_harness.state import Check, HarnessConfig, Limits
-from slick.tools import prepare_tools
-from slick.turns import ModelTurn, ToolCall, ToolResult
+from slick import Session
 
 
 class Script:
@@ -18,8 +17,8 @@ class Script:
     def identity(self):
         return {"provider": "demo", "model": "scripted"}
 
-    async def aturn(self, history, *, tools, instructions=""):
-        self.requests.append(list(history))
+    async def acall(self, context, *, tools=None, tool_results=""):
+        self.requests.append({"context": context, "tool_results": tool_results or []})
         response = self.responses.popleft()
         if isinstance(response, Exception):
             raise response
@@ -27,9 +26,7 @@ class Script:
 
 
 def turn(text="", calls=()):
-    return ModelTurn(
-        "demo", "scripted", text, list(calls), [], "tool_calls" if calls else "end_turn"
-    )
+    return (text, list(calls))
 
 
 def test_model_cannot_declare_unchecked_work_verified(workspace):
@@ -43,14 +40,17 @@ def test_model_cannot_declare_unchecked_work_verified(workspace):
 def test_unknown_and_invalid_tools_do_not_execute(workspace):
     provider = Script(
         turn(
-            calls=[ToolCall("a", "missing", {}), ToolCall("b", "create_file", {"path": "bad.py"})]
+            calls=[
+                {"id": "a", "name": "missing", "arguments": {}},
+                {"id": "b", "name": "create_file", "arguments": {"path": "bad.py"}},
+            ]
         ),
         turn("Done"),
     )
     agent = CodingAgent(provider, workspace, HarnessConfig())
     asyncio.run(agent.run("Read"))
-    results = [item for item in provider.requests[1] if isinstance(item, ToolResult)]
-    assert len(results) == 2 and all(item.is_error for item in results)
+    results = [item for item in provider.requests[1]["tool_results"] if "request" in item]
+    assert len(results) == 2 and all(item["is_error"] for item in results)
     assert not (workspace.root / "bad.py").exists()
 
 
@@ -58,8 +58,8 @@ def test_budget_closes_call_group_without_extra_effects(workspace):
     provider = Script(
         turn(
             calls=[
-                ToolCall("a", "create_file", {"path": "a.py", "content": "1"}),
-                ToolCall("b", "create_file", {"path": "b.py", "content": "2"}),
+                {"id": "a", "name": "create_file", "arguments": {"path": "a.py", "content": "1"}},
+                {"id": "b", "name": "create_file", "arguments": {"path": "b.py", "content": "2"}},
             ]
         )
     )
@@ -69,9 +69,9 @@ def test_budget_closes_call_group_without_extra_effects(workspace):
     assert result.status == "blocked"
     assert (workspace.root / "a.py").exists()
     assert not (workspace.root / "b.py").exists()
-    results = [item for item in agent.state.history if isinstance(item, ToolResult)]
-    assert [item.call_id for item in results] == ["a", "b"]
-    assert results[-1].is_error
+    results = [work["result"] for exchange in agent.session.history for work in exchange["work"]]
+    assert [item["request"]["id"] for item in results] == ["a", "b"]
+    assert results[-1]["is_error"]
 
 
 def test_request_failure_does_not_fabricate_turn_and_can_continue(workspace):
@@ -79,7 +79,7 @@ def test_request_failure_does_not_fabricate_turn_and_can_continue(workspace):
     agent = CodingAgent(provider, workspace, HarnessConfig())
     first = asyncio.run(agent.run("Fix"))
     assert first.status == "failed"
-    assert not any(isinstance(item, ModelTurn) for item in agent.state.history)
+    assert agent.session.history == []
     second = asyncio.run(agent.run("Try again"))
     assert second.answer == "Recovered"
 
@@ -89,7 +89,7 @@ def test_cancelled_api_records_status_and_rejects_overlapping_run(workspace):
         started = asyncio.Event()
 
         class Waiting(Script):
-            async def aturn(self, *args, **kwargs):
+            async def acall(self, *args, **kwargs):
                 started.set()
                 await asyncio.Event().wait()
 
@@ -107,20 +107,31 @@ def test_cancelled_api_records_status_and_rejects_overlapping_run(workspace):
     asyncio.run(scenario())
 
 
-def test_reused_call_id_stops_before_second_effect(workspace):
+def test_call_ids_are_scoped_to_independent_requests(workspace):
     provider = Script(
-        turn(calls=[ToolCall("same", "create_file", {"path": "a.py", "content": "1"})]),
-        turn(calls=[ToolCall("same", "create_file", {"path": "b.py", "content": "2"})]),
+        turn(
+            calls=[
+                {"id": "same", "name": "create_file", "arguments": {"path": "a.py", "content": "1"}}
+            ]
+        ),
+        turn(
+            calls=[
+                {"id": "same", "name": "create_file", "arguments": {"path": "b.py", "content": "2"}}
+            ]
+        ),
     )
+    provider.responses.append(turn("Done"))
     agent = CodingAgent(provider, workspace, HarnessConfig())
     result = asyncio.run(agent.run("Create"))
-    assert result.status == "failed" and "duplicate" in result.answer
+    assert result.status == "unverified"
     assert (workspace.root / "a.py").exists()
-    assert not (workspace.root / "b.py").exists()
+    assert (workspace.root / "b.py").exists()
 
 
 def test_request_budget_prevents_next_request(workspace):
-    provider = Script(turn(calls=[ToolCall("read", "read_file", {"path": "sample.py"})]))
+    provider = Script(
+        turn(calls=[{"id": "read", "name": "read_file", "arguments": {"path": "sample.py"}}])
+    )
     agent = CodingAgent(provider, workspace, HarnessConfig(limits=Limits(max_turns=1)))
     result = asyncio.run(agent.run("Inspect"))
     assert result.status == "blocked" and result.turns == 1
@@ -129,13 +140,13 @@ def test_request_budget_prevents_next_request(workspace):
 
 def test_task_deadline_stops_waiting_request(workspace):
     class Waiting(Script):
-        async def aturn(self, *args, **kwargs):
+        async def acall(self, *args, **kwargs):
             await asyncio.Event().wait()
 
     agent = CodingAgent(Waiting(), workspace, HarnessConfig(limits=Limits(task_timeout=1)))
     result = asyncio.run(agent.run("Wait"))
     assert result.status == "blocked" and "deadline" in result.answer
-    assert result.turns == 1 and not agent.state.running
+    assert result.turns == 1 and (not agent.state.running)
 
 
 def test_serialization_failure_after_effect_is_not_retried(workspace):
@@ -145,13 +156,15 @@ def test_serialization_failure_after_effect_is_not_retried(workspace):
             stream.write("effect\n")
         return "invalid"
 
-    provider = Script(turn(calls=[ToolCall("write", "broken_return", {})]), turn("Stopped"))
+    provider = Script(
+        turn(calls=[{"id": "write", "name": "broken_return", "arguments": {}}]), turn("Stopped")
+    )
     agent = CodingAgent(provider, workspace, HarnessConfig())
-    agent.tools = prepare_tools([broken_return])
+    agent.session = Session(provider=provider, tools=[broken_return])
     asyncio.run(agent.run("Write once"))
     assert (workspace.root / "effects.txt").read_text() == "effect\n"
-    result = next(item for item in provider.requests[1] if isinstance(item, ToolResult))
-    assert result.is_error and "effects may have occurred" in result.content
+    result = next(item for item in provider.requests[1]["tool_results"] if "request" in item)
+    assert result["is_error"] and "effects may have occurred" in result["content"]
 
 
 def test_cancellation_completes_multicall_history_without_later_effect(workspace):
@@ -168,25 +181,31 @@ def test_cancellation_completes_multicall_history_without_later_effect(workspace
         provider = Script(
             turn(
                 calls=[
-                    ToolCall("first", "slow_write", {}),
-                    ToolCall("second", "create_file", {"path": "second.txt", "content": "no"}),
+                    {"id": "first", "name": "slow_write", "arguments": {}},
+                    {
+                        "id": "second",
+                        "name": "create_file",
+                        "arguments": {"path": "second.txt", "content": "no"},
+                    },
                 ]
             )
         )
         agent = CodingAgent(provider, workspace, HarnessConfig())
-        agent.tools.update(prepare_tools([slow_write]))
+        agent.session = Session(provider=provider, tools=[*agent.session.tools, slow_write])
         task = asyncio.create_task(agent.run("Write"))
         await asyncio.wait_for(started.wait(), 2)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        results = [item for item in agent.state.history if isinstance(item, ToolResult)]
-        assert [item.call_id for item in results] == ["first", "second"]
-        assert "effects may have occurred" in results[0].content
-        assert "Not started" in results[1].content
+        results = [
+            work["result"] for exchange in agent.session.history for work in exchange["work"]
+        ]
+        assert [item["request"]["id"] for item in results] == ["first", "second"]
+        assert "effects may have occurred" in results[0]["content"]
+        assert "Not started" in results[1]["content"]
         assert (workspace.root / "first.txt").read_text() == "effect"
         assert not (workspace.root / "second.txt").exists()
-        agent._history_valid(agent.state.history)
+        assert len(agent.session.ready_results) == 2
 
     asyncio.run(scenario())
 
@@ -198,7 +217,15 @@ def test_failed_checks_stop_at_no_progress_or_repair_budget(workspace, change):
     responses = [turn("First attempt")]
     if change:
         responses.append(
-            turn(calls=[ToolCall("edit", "create_file", {"path": "new.py", "content": "1"})])
+            turn(
+                calls=[
+                    {
+                        "id": "edit",
+                        "name": "create_file",
+                        "arguments": {"path": "new.py", "content": "1"},
+                    }
+                ]
+            )
         )
     responses.append(turn("Second attempt"))
     provider = Script(*responses)
@@ -216,7 +243,7 @@ def test_changes_after_checks_cannot_be_published_as_verified(workspace):
     workspace.allowed_commands.add((str(workspace.root), tuple(check.argv)))
 
     def external_edit(event):
-        if event.kind == "verification" and not event.data["baseline"]:
+        if event.kind == "verification" and (not event.data["baseline"]):
             with (workspace.root / "sample.py").open("a") as stream:
                 stream.write("# external edit\n")
 
@@ -232,7 +259,15 @@ def test_changes_after_checks_cannot_be_published_as_verified(workspace):
 
 def test_modified_verification_files_are_prominent(workspace):
     provider = Script(
-        turn(calls=[ToolCall("test", "create_file", {"path": "test_new.py", "content": "pass"})]),
+        turn(
+            calls=[
+                {
+                    "id": "test",
+                    "name": "create_file",
+                    "arguments": {"path": "test_new.py", "content": "pass"},
+                }
+            ]
+        ),
         turn("Done"),
     )
     result = asyncio.run(CodingAgent(provider, workspace, HarnessConfig()).run("Add test"))
@@ -248,16 +283,16 @@ def test_configured_check_script_changes_are_prominent(workspace):
     provider = Script(
         turn(
             calls=[
-                ToolCall(
-                    "weaken",
-                    "edit_file",
-                    {
+                {
+                    "id": "weaken",
+                    "name": "edit_file",
+                    "arguments": {
                         "path": "check_behavior.py",
                         "old": source.text,
                         "new": "pass\n",
                         "expected_sha256": source.sha256,
                     },
-                )
+                }
             ]
         ),
         turn("Done"),

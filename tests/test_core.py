@@ -23,7 +23,7 @@ class FakeProvider:
 
     def call(self, text):
         self.calls.append(text)
-        return self.response
+        return (self.response, [])
 
     async def acall(self, text):
         await asyncio.sleep(0)
@@ -146,7 +146,7 @@ def test_async_functions_render_and_execute_without_hidden_sync_calls(root):
     class AsyncOnly:
         async def acall(self, text):
             await asyncio.sleep(0)
-            return '{"headline":"' + text.splitlines()[0] + '", "points":[]}'
+            return ('{"headline":"' + text.splitlines()[0] + '", "points":[]}', [])
 
     @slick.prompt(provider=AsyncOnly())
     async def summarize(document: str) -> Summary:
@@ -217,7 +217,7 @@ def test_provider_selection_is_explicit_and_unsupported_async_fails(root):
 def test_custom_provider_needs_no_identity_unless_persistence_is_enabled(root):
     class Minimal:
         def call(self, text):
-            return text
+            return (text, [])
 
     @slick.prompt(provider=Minimal())
     def echo(value: str) -> str:
@@ -238,7 +238,7 @@ def test_explicit_repairs_do_not_require_disk_persistence(root, asynchronous):
     class Repairing(FakeProvider):
         def call(self, text):
             self.calls.append(text)
-            return "bad" if len(self.calls) == 1 else "[1,2]"
+            return ("bad" if len(self.calls) == 1 else "[1,2]", [])
 
     provider = Repairing()
 

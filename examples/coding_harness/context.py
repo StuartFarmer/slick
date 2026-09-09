@@ -1,10 +1,8 @@
-"""Application-owned Jinja context; native protocol history stays structured."""
+"""Application-owned Jinja context and explicit input-size bounds."""
 
 import json
-from dataclasses import asdict
 
 from slick import Prompt
-from slick.turns import ModelTurn, ToolResult, UserMessage
 
 SKILLS = {"python": "coding_harness/skills/python.j2"}
 
@@ -21,10 +19,10 @@ def render_instructions(workspace, config) -> str:
     )
 
 
-def context_size(history: list, *, instructions: str, tools: list) -> int:
+def context_size(context: str, *, tools: list, tool_results=None) -> int:
     payload = {
-        "history": [asdict(item) for item in history],
-        "instructions": instructions,
+        "context": context,
+        "tool_results": tool_results or [],
         "tools": [
             {"name": tool.name, "description": tool.description, "parameters": tool.parameters}
             for tool in tools
@@ -33,28 +31,52 @@ def context_size(history: list, *, instructions: str, tools: list) -> int:
     return len(json.dumps(payload, ensure_ascii=False, allow_nan=False))
 
 
-def history_views(history: list) -> list[dict]:
-    """Select observable content only; never render provider reasoning payloads."""
+def history_views(session, state, *, include_ready=False) -> list[dict]:
+    """Project responses and app notes; never replay an already rendered prompt."""
+    history = session.history
+    notes = {}
+    for note in state.context_notes:
+        notes.setdefault(note["after"], []).append(
+            {key: value for key, value in note.items() if key != "after"}
+        )
     views = []
-    for item in history:
-        match item:
-            case UserMessage(text=text):
-                views.append({"role": "user", "text": text})
-            case ModelTurn(text=text, tool_calls=calls):
-                views.append(
-                    {"role": "assistant", "text": text, "calls": [asdict(call) for call in calls]}
-                )
-            case ToolResult(call_id=call_id, content=content, is_error=error):
-                views.append({"role": "tool", "id": call_id, "text": content, "error": error})
-            case _:
-                raise ValueError("Unknown history record")
+    for index in range(state.context_start, len(history) + 1):
+        views.extend(notes.get(index, []))
+        if index == len(history):
+            break
+        exchange = history[index]
+        work = [item for item in exchange["work"] if include_ready or item["submitted"]]
+        views.append(
+            {
+                "role": "assistant",
+                "text": exchange["text"],
+                "calls": [item["request"] for item in work],
+            }
+        )
+        views.extend(
+            {
+                "role": "tool",
+                "id": item["request"]["id"],
+                "text": item["result"]["content"],
+                "error": item["result"]["is_error"],
+            }
+            for item in work
+            if item["result"] is not None
+        )
     return views
 
 
-def summary_prompt(state, config) -> str:
+def render_context(workspace, config, state, session) -> str:
+    return Prompt("coding_harness/context.j2")(
+        instructions=render_instructions(workspace, config),
+        history=history_views(session, state),
+    )
+
+
+def summary_prompt(state, config, session) -> str:
     from .state import ContextSummary
 
-    views = history_views(state.history)
+    views = history_views(session, state)
     omitted = 0
     while True:
         text = Prompt("coding_harness/compact.j2")(
@@ -62,13 +84,11 @@ def summary_prompt(state, config) -> str:
             checks=[check.model_dump() for check in config.checks],
             ledger=state.edit_ledger,
             history=views,
+            tool_work={"requests": session.pending_requests, "results": session.ready_results},
             omitted=omitted,
             schema=ContextSummary.model_json_schema(),
         )
-        if (
-            context_size([UserMessage(text)], instructions="", tools=[])
-            <= config.limits.context_hard_chars
-        ):
+        if context_size(text, tools=[]) <= config.limits.context_hard_chars:
             return text
         if not views:
             raise ValueError("Pinned summary context exceeds the input-size limit")

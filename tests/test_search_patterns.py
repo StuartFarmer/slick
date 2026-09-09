@@ -22,7 +22,7 @@ class FakeProvider:
 
     async def acall(self, text):
         self.inputs.append(text)
-        return json.dumps(next(self.responses))
+        return (json.dumps(next(self.responses)), [])
 
 
 @pytest.fixture(autouse=True)
@@ -239,8 +239,8 @@ def test_tree_dead_end_stops_without_more_calls():
 def test_patterns_accept_fenced_json(module_name, class_name, responses):
     class FencedProvider(FakeProvider):
         async def acall(self, text):
-            response = await super().acall(text)
-            return f"```json\n{response}\n```"
+            response, _ = await super().acall(text)
+            return (f"```json\n{response}\n```", [])
 
     module = importlib.import_module(f"examples.{module_name}")
     pattern = getattr(module, class_name)("Task", FencedProvider(responses))

@@ -159,7 +159,8 @@ class HarnessEvent:
 
 @dataclass
 class SessionState:
-    history: list = field(default_factory=list)
+    context_notes: list[dict] = field(default_factory=list)
+    context_start: int = 0
     archived_histories: list[list] = field(default_factory=list)
     task: str = ""
     turns: int = 0

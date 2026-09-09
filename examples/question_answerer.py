@@ -18,7 +18,7 @@ class QuestionAnswerer:
 
     async def ask(self, question: str) -> str:
         text = self.answer_prompt(question=question, messages=self.history)
-        answer = await self.provider.acall(text)
+        answer, _ = await self.provider.acall(text)
         self.history.extend(
             [
                 {"role": "user", "content": question},
@@ -29,7 +29,8 @@ class QuestionAnswerer:
 
     async def critique(self, answer: str) -> str:
         text = self.critique_prompt(answer=answer)
-        return await self.provider.acall(text)
+        response, _ = await self.provider.acall(text)
+        return response
 
 
 def main(argv=None):

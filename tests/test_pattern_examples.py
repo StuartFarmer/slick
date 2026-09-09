@@ -54,7 +54,7 @@ def test_self_refiner_methods_and_failed_draft_preserve_state(template_root):
             self.inputs.append(text)
             if len(self.inputs) == 4:
                 raise RuntimeError("unavailable")
-            return next(self.responses)
+            return (next(self.responses), [])
 
     async def run():
         provider = FakeProvider()
@@ -116,7 +116,7 @@ def test_grounded_answer_checks_citations_against_retrieved_evidence(template_ro
     class FakeProvider:
         async def acall(self, text):
             assert "[history]" in text
-            return '{"answer":"Use messages", "citations":["invented"]}'
+            return ('{"answer":"Use messages", "citations":["invented"]}', [])
 
     qa = module.GroundedAnswerer(
         FakeProvider(),

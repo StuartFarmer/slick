@@ -31,7 +31,7 @@ class StubProvider:
 
     def call(self, prompt_text: str) -> str:
         self.prompts.append(prompt_text)
-        return self.responses[min(len(self.prompts), len(self.responses)) - 1]
+        return (self.responses[min(len(self.prompts), len(self.responses)) - 1], [])
 
 
 class Logged(unittest.TestCase):

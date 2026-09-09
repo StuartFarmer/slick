@@ -5,9 +5,9 @@ import builtins
 import importlib
 import json
 import sys
-from types import SimpleNamespace as NS
 
 import pytest
+from sdk_fakes import JsonNamespace as NS
 
 
 def provider_class(provider):
@@ -94,8 +94,8 @@ def test_requests_return_exact_text_and_respect_client_ownership(
     provider_instance = provider_class(provider)(
         "explicit-model", timeout=12.5, max_output_tokens=123, max_retries=1, **injected
     )
-    assert invoke(provider_instance, asynchronous) == "  answer\n"
-    assert invoke(provider_instance, asynchronous) == "  answer\n"
+    assert invoke(provider_instance, asynchronous) == ("  answer\n", [])
+    assert invoke(provider_instance, asynchronous) == ("  answer\n", [])
     expected = {"model": "explicit-model"}
     if provider == "OpenAI":
         expected.update(input="input\n", max_output_tokens=123, store=False)
@@ -204,11 +204,11 @@ def test_refused_incomplete_or_nontext_outputs_are_errors(provider, reply, async
 def test_empty_text_is_preserved_and_multiple_blocks_are_joined(provider):
     reply = response(provider, "")
     provider_instance = provider_class(provider)("model", client=Client(reply))
-    assert provider_instance.call("input") == ""
+    assert provider_instance.call("input") == ("", [])
     blocks = reply.output[-1].content if provider == "OpenAI" else reply.content
     kind = "output_text" if provider == "OpenAI" else "text"
     blocks.extend([NS(type=kind, text=" left "), NS(type=kind, text="right\n")])
-    assert provider_instance.call("input") == " left right\n"
+    assert provider_instance.call("input") == (" left right\n", [])
 
 
 @pytest.mark.parametrize("provider", ["OpenAI", "Anthropic"])

@@ -2,11 +2,37 @@
 
 import asyncio
 import importlib
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from slick import prompts
+
+
+def test_session_example_runs_actual_tool_offline():
+    result = subprocess.run(
+        [sys.executable, "-m", "examples.session"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "pricing.md" in result.stdout
+    assert "Search executions: 1" in result.stdout
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude"])
+def test_session_example_rejects_command_providers(provider):
+    result = subprocess.run(
+        [sys.executable, "-m", "examples.session", "--provider", provider],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 2
+    assert "Python tools" in result.stderr
 
 
 def test_summary_history_and_retrieval_examples(monkeypatch, tmp_path):
@@ -20,11 +46,14 @@ def test_summary_history_and_retrieval_examples(monkeypatch, tmp_path):
 
         async def acall(self, text):
             self.inputs.append(text)
-            return [
-                '{"headline":"Jinja to LLM", "points":["Explicit context"]}',
-                "Yes, the history is included.",
-                "Use a list of messages.",
-            ][len(self.inputs) - 1]
+            return (
+                [
+                    '{"headline":"Jinja to LLM", "points":["Explicit context"]}',
+                    "Yes, the history is included.",
+                    "Use a list of messages.",
+                ][len(self.inputs) - 1],
+                [],
+            )
 
     provider = FakeProvider()
     results = asyncio.run(example.run(provider))
@@ -50,9 +79,12 @@ def test_question_answerer_owns_history_and_keeps_critique_separate(monkeypatch)
 
         async def acall(self, text):
             self.inputs.append(text)
-            return ["Hello, Ada.", "Your name is Ada.", "The answer is supported."][
-                len(self.inputs) - 1
-            ]
+            return (
+                ["Hello, Ada.", "Your name is Ada.", "The answer is supported."][
+                    len(self.inputs) - 1
+                ],
+                [],
+            )
 
     async def run():
         provider = FakeProvider()

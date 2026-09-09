@@ -34,7 +34,8 @@ class SolutionSampler:
             raise ValueError("count must be a positive integer")
         for _ in range(count):
             text = self.sample_prompt(problem=self.problem, schema=Solution.model_json_schema())
-            solution = parse(await self.provider.acall(text), Solution)
+            response, _ = await self.provider.acall(text)
+            solution = parse(response, Solution)
             self.samples.append(solution)
         return self.samples
 

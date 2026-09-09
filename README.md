@@ -9,7 +9,7 @@ from slick.providers import OpenAIAPI
 provider = OpenAIAPI(model="YOUR_MODEL_ID")
 answer_prompt = Prompt("answer.j2")
 text = answer_prompt(question="How does authentication work?", documents=documents)
-answer = await provider.acall(text)
+answer, _ = await provider.acall(text)
 ```
 
 Prompts render arguments into text. Providers execute text and return responses.
@@ -52,8 +52,8 @@ Question: {{ question }}
 from slick import render, parse
 
 text = render("answer.j2", question=question, documents=documents)
-response = provider.call(text)           # synchronous execution
-response = await provider.acall(text)    # asynchronous execution (a separate call)
+response, _ = provider.call(text)           # synchronous execution
+response, _ = await provider.acall(text)    # asynchronous execution (a separate call)
 
 value = parse(response)               # text unchanged
 numbers = parse("[1, 2, 3]", list[int])
@@ -89,7 +89,7 @@ class QuestionAnswerer:
 
     async def ask(self, question):
         text = self.answer_prompt(question=question, messages=self.history)
-        answer = await self.provider.acall(text)
+        answer, _ = await self.provider.acall(text)
         self.history.extend([
             {"role": "user", "content": question},
             {"role": "assistant", "content": answer},
@@ -97,7 +97,8 @@ class QuestionAnswerer:
         return answer
 
     async def critique(self, answer):
-        return await self.provider.acall(self.critique_prompt(answer=answer))
+        text, _ = await self.provider.acall(self.critique_prompt(answer=answer))
+        return text
 ```
 
 The class owns the provider and history. Its methods combine ordinary Python and
@@ -154,10 +155,103 @@ it does not undo its effects. `ainvoke` awaits async functions and runs sync
 functions inline. Wrap blocking work explicitly with `asyncio.to_thread` when
 needed. Cancellation propagates normally.
 
-This is the local tool primitive. API providers still accept text only; native
-tool registration, provider schema adaptation, and the model/tool loop are a
-separate milestone. `parameters` provides a fresh local schema, which may require
-adaptation for a provider's supported schema subset.
+API providers accept these functions through `tools=` and convert their schemas
+into the native API format. `Session` coordinates execution and result submission.
+
+## Automatic sessions
+
+`Session` records interactions and tracks tool work automatically. Register normal
+functions once, supply context, then decide when to execute the requested tools:
+
+```python
+from slick import Session
+
+async def search(query: str) -> str:
+    """Search documents."""
+    return await remote_worker.search(query)
+
+session = Session(provider=model, tools=[search])
+
+text, requests = await session.acall(context)
+results = await session.resolve_pending()
+text, requests = await session.acall(next_context)
+```
+
+The second call automatically includes completed results. No response recording
+or result submission is required. `resolve_pending()` executes outstanding work
+sequentially, returns the results it produced, and returns `[]` when nothing is
+pending. Individual execution is also available:
+
+```python
+for request in requests:
+    result = await session.resolve(request)
+```
+
+`acall()` performs one model call and never executes tools. The application owns
+its loop, stopping conditions and context selection. Session sends exactly the
+context supplied; it never automatically replays, summarizes or renders history.
+Use Jinja to render whichever observations your application needs. Recorded
+`exchange["context"]` is the full prompt already sent, so don't recursively insert
+those prompts into future ones.
+
+| Property | Contents |
+| --- | --- |
+| `history` | Detached exchange dictionaries containing `context`, `text`, and `work` |
+| `pending_requests` | Requests that have not executed |
+| `ready_results` | Completed results awaiting the next successful model call |
+| `tools` | Registered Tool wrappers in a fresh list |
+
+Each work record contains its canonical `request`, its `result` (or `None`), and
+a `submitted` flag. The exchange scopes request IDs; different exchanges may
+reuse them. `resolve(request)` matches the full request value in the current
+exchange and returns a cached result if that work is already complete. Use the
+current response or `pending_requests`; identical request values reissued in a
+later exchange denote new work.
+
+Tool failures become error results. Cancellation records an interrupted result
+with a possible-effects warning, then propagates; later work stays pending.
+`session.cancel_pending("run stopped")` marks unstarted work as stopped without
+executing it. Resolve or cancel pending requests before the next Session call.
+Failed provider calls leave ready results intact. No tool or model call is
+retried automatically.
+
+Switch providers at a call boundary:
+
+```python
+text, requests = await session.acall(next_context, provider=other_model)
+```
+
+An override applies to that call only. Canonical results are converted by the
+selected provider; its tool/input capability limits still apply. Use a raw
+provider call or a separate Session for summarization so it doesn't consume the
+main Session's ready results.
+
+Snapshots contain data only and can be stored using ordinary JSON:
+
+```python
+import json
+
+payload = json.dumps(session.to_dict())
+restored = Session.from_dict(
+    json.loads(payload), provider=other_model, tools=[search],
+)
+await restored.resolve_pending()  # Executes only work without a recorded result.
+text, requests = await restored.acall(next_context)
+```
+
+Snapshot methods perform no I/O or execution. Reconnect live providers and tools
+explicitly; application state, credentials, functions and resource connections
+are not serialized. Save between operations, including between tools in a batch.
+This does not guarantee exactly-once external effects across a crash before a
+tool's result is recorded.
+
+Session is asynchronous and allows one operation at a time per instance. Sync
+tools run inline as they do with `Tool.ainvoke`; concurrency and process pools
+remain future additions. Provider clients belong to the application, and Session
+does not close them. Raw `provider.call/acall` remains available independently.
+
+Run the complete offline example with `python -m examples.session`, or see the
+[coding harness](examples/coding_harness/README.md) for budgets, verification and a TUI.
 
 ## Existing executing decorator
 
@@ -240,17 +334,14 @@ claude = ClaudeCLI(workdir=".")
 default_cli = get_command()         # configured CLI provider and model
 ```
 
-All built-in providers inherit `Provider`, an abstract class requiring `call` and
-`acall`. Pass the complete prompt positionally; both methods return final text.
-CLI agents may perform multiple steps or use tools before returning that text.
-The shared class does not require `aturn`, `execute`, or a metadata interface.
+All built-in providers inherit `Provider`. Both `call(context, tools=None,
+tool_results=None)` and `acall(...)` return `(text, tool_requests)`. Tool arguments
+are keyword-only. Text-only responses use an empty request list.
 
-Native API adapters use [OpenAI Responses](https://developers.openai.com/api/docs/libraries)
-and [Anthropic Messages](https://platform.claude.com/docs/en/cli-sdks-libraries/sdks/python).
-Both expose `call(text)` and `acall(text)`. Refused, incomplete, or unexpected
-tool outputs raise `ProviderError`; native transport
-exceptions remain accessible through the chained cause. The text-only methods
-do not configure tools; use `aturn` for native tool requests.
+Native API adapters use OpenAI Responses, Anthropic Messages, or Chat Completions.
+They validate input before opening a client, perform one exchange, and never
+execute Python functions. Refused, incomplete, or unsupported output raises
+`ProviderError`; transport exceptions remain accessible through the chained cause.
 
 Native SDK transport retries default to zero; set `max_retries=` explicitly to enable
 them. Owned native SDK clients are created and closed per call. For connection reuse,
@@ -274,7 +365,9 @@ billing are owned by the invoked CLI.
 then `set_default(provider=..., model=...)`, then `SLICK_PROVIDER` / `SLICK_MODEL`,
 then the built-in default. Construct API providers explicitly with a model ID.
 
-A custom provider only needs `call(text) -> str`, `acall(text) -> str`, or both.
+A custom provider implements `call(context)` and/or `acall(context)`, returning
+`(text, tool_requests)`. Providers supporting tools also accept `tools=` and
+`tool_results=`. Existing string-returning custom providers must return `(text, [])`.
 No inheritance, registration or metadata is required for ordinary calls.
 
 ### OpenRouter API
@@ -283,7 +376,7 @@ No inheritance, registration or metadata is required for ordinary calls.
 from slick.providers import OpenRouterAPI
 
 router = OpenRouterAPI("PROVIDER/MODEL")
-answer = await router.acall("Explain Python generators.")
+answer, _ = await router.acall("Explain Python generators.")
 ```
 
 Install `slick-ai[openai]` and set `OPENROUTER_API_KEY`, or supply `api_key=`.
@@ -293,9 +386,8 @@ additional `openrouter/` prefix. Calls go directly to
 as described in [OpenRouter's quickstart](https://openrouter.ai/docs/quickstart).
 No LiteLLM installation or local gateway process is required.
 
-`call` and `acall` preserve final text and reject incomplete, refused, or tool-call
-responses. `aturn` uses the shared Slick Chat Completions codec for native tool
-requests. Defaults are `timeout=60`, `max_output_tokens=2048`, and `max_retries=0`.
+`call` and `acall` use the shared Slick Chat Completions converter for text and
+tool requests. Defaults are `timeout=60`, `max_output_tokens=2048`, and `max_retries=0`.
 The retry setting controls SDK transport retries; OpenRouter's own upstream routing
 is managed by its service.
 
@@ -328,7 +420,7 @@ private = LiteLLMAPI(
 )
 router = LiteLLMAPI("openrouter/PROVIDER/MODEL")
 
-answer = await local.acall("Explain Python generators.")
+answer, _ = await local.acall("Explain Python generators.")
 ```
 
 Replace `PROVIDER/MODEL` with an available OpenRouter catalog ID and `private-model`
@@ -346,11 +438,10 @@ output token limit is imposed. Provider-specific settings pass to LiteLLM;
 model and provider capabilities determine whether they are supported.
 
 Calls use the SDK's `completion`/`acompletion` functions without requiring a proxy.
-They reject truncated, refused, malformed, or tool-call responses with
-`ProviderError`, retaining provider exceptions as chained causes. Successful text
-is returned unchanged, including whitespace. Native `aturn` calls use the same
-shared Chat Completions tool/history conversion as OpenRouter; text calls remain
-tool-free. Streaming and fallback routing cannot be set in `options`.
+They reject truncated, refused, or malformed responses with `ProviderError`,
+retaining provider exceptions as chained causes. Text is returned unchanged inside
+the tuple. Tools and their results use the same Chat Completions conversion as
+OpenRouter. Streaming and fallback routing cannot be set in `options`.
 Slick requests `drop_params=False`, but individual LiteLLM provider adapters can
 still translate or filter parameters.
 
@@ -366,70 +457,110 @@ provider-specific. The evaluated ChatGPT adapter injects default instructions an
 discards output token limits, so Slick rejects those explicit limit options for
 `chatgpt/`. Use `CodexCLI` or `ClaudeCLI` when you want execution through that installed CLI.
 
-`LiteLLMAPI` also exposes `aturn(history, tools=..., instructions=...)` using the
-shared Chat Completions codec. Its identity excludes credentials and arbitrary
-options, so it can be used in explicit session/provider metadata without leaking
-secrets.
+## Tool requests and results
 
-## Native tool turns
+```python
+text, requests = await provider.acall(context, tools=[lookup])
+```
 
-The native OpenAI and Anthropic providers also expose
-`aturn(history, tools=..., instructions=...)`. It prepares
-callables and performs one request, returning text, tool calls, provider-native
-items and available usage. The application owns history and executes the functions:
+`tools` contains ordinary functions, bound methods, or prepared `Tool` instances.
+Each returned request is a dictionary:
+
+```python
+{"id": "a", "name": "lookup", "arguments": {"name": "blue"}}
+```
+
+Your application executes requests and supplies results on its next call:
 
 ```python
 import asyncio
 from slick import ToolError
-from slick.providers import OpenAIAPI
+from slick.providers import AnthropicAPI
 from slick.tools import prepare_tools
-from slick.turns import ToolResult, UserMessage
+
 
 def lookup(name: str) -> str:
     """Look up a local color description."""
     return {"blue": "a cool primary color"}.get(name, "unknown")
 
+
 async def main():
-    provider = OpenAIAPI(model="YOUR_MODEL_ID")
+    provider = AnthropicAPI(model="YOUR_MODEL_ID")
     tools = prepare_tools([lookup])
-    history = [UserMessage("Look up blue and describe it.")]
+    context = "Look up blue and describe it."
+    results = []
     for _ in range(5):
-        turn = await provider.aturn(history, tools=list(tools.values()))
-        history.append(turn)
-        if not turn.tool_calls:
-            print(turn.text)
+        text, requests = await provider.acall(
+            context, tools=list(tools.values()), tool_results=results,
+        )
+        if not requests:
+            print(text)
             return
-        for call in turn.tool_calls:
-            if call.argument_error or call.name not in tools:
-                result = ToolResult(call.id, call.argument_error or "Unknown tool", True)
-            else:
+        results = []
+        for request in requests:
+            error = request.get("argument_error")
+            if not error and request["name"] not in tools:
+                error = "Unknown tool"
+            if not error:
                 try:
-                    output = await tools[call.name].ainvoke(call.arguments)
-                except ToolError as error:
-                    result = ToolResult(call.id, str(error), True)
-                else:
-                    result = ToolResult(call.id, output)
-            history.append(result)
-    raise RuntimeError("Turn budget exhausted")
+                    content = await tools[request["name"]].ainvoke(request["arguments"])
+                except ToolError as exc:
+                    error = str(exc)
+            results.append({
+                "request": request,
+                "content": error if error else content,
+                "is_error": bool(error),
+            })
+        # Render different context here if desired; only this text is sent next.
+    raise RuntimeError("Request budget exhausted")
+
 
 asyncio.run(main())
 ```
 
-Install the API extra and set credentials before running this live example.
-`AnthropicAPI` supports the same interface. Plain functions and bound methods may
-also be passed directly in `tools=[...]`. Native records live in `slick.turns`.
-Preserve returned turns unchanged: their opaque provider payloads carry information
-needed by subsequent requests. Supply one result for every requested tool before
-the next turn. Foreign provider/model histories and broken result groups fail
-before network I/O. There is no automatic tool execution or retry loop.
-OpenAI tool definitions use `strict=False` to preserve Python optional/default
-arguments; Slick's local argument and return validation remains strict. These
-native methods support local function tools, not provider-hosted tools or media.
+Install the appropriate SDK extra and configure credentials before running real
+calls. The same interface is available on OpenAIAPI, OpenRouterAPI, and LiteLLMAPI.
+
+Results contain the originating request because an ID alone does not tell a fresh
+provider instance the function name or its arguments. There is no separate outgoing
+`tool_calls` argument. Dictionaries survive JSON save/load and can be submitted to
+another instance without replaying conversation history. `ToolRequest` and
+`ToolResult` in `slick.tools` are optional TypedDict annotations, not wrapper objects.
+
+`content` is serialized text. Tool invocation already converts structured return
+values to JSON; do not encode that text twice. `is_error` defaults to false.
+Malformed model JSON arguments retain their raw string and an `argument_error`;
+return an error result without executing them. Anthropic's object-only tool input
+cannot represent malformed raw JSON from another provider and is rejected explicitly.
+
+Slick validates dictionary fields and unique IDs within each batch. It does not
+remember earlier IDs or infer missing results. The application chooses which
+requests to answer, in what order, and with what context. Empty context is allowed
+with results; an empty call with no results fails locally. Results may be supplied
+with `tools=[]` to make no functions available for the next response.
+
+Provider converters build the corresponding assistant tool requests and outputs
+internally. OpenAI uses `function_call_output`, Anthropic uses `tool_result`, and
+Chat Completions uses tool-role messages. OpenAI definitions use `strict=False`
+to retain Python optional/default arguments; local Tool validation remains strict.
+
+This portable interface covers text and local function tools. It does not expose
+usage metadata, hosted tools, media, or native reasoning replay. Responses that
+combine tool requests with reasoning data requiring replay raise `ProviderError`
+instead of silently dropping that data. Final text from reasoning responses remains
+supported. Command providers return `(text, [])` and reject nonempty Python tools
+or tool results before launching a process.
+
+The former `aturn`, turn dataclasses, and provider history validation have been
+removed. Migrate string consumers to `text, requests = ...`; prompt decorators
+still return their declared Python output type and reject pending tool requests
+before parsing, repair, or caching. `Prompt`, `render`, and `parse` remain independent
+text operations.
 
 The [coding harness example](examples/coding_harness/README.md) adds error recovery,
-cancellation, workspace tools, verification, sessions and a TUI as ordinary Python.
-It defaults to OpenAI with an explicit `--model` and `--workspace`.
-Its offline demo runs with `python -m examples.coding_harness --dry-run --headless --task 'Fix total'`.
+cancellation, workspace tools, verification, saved app state, and a TUI as ordinary
+Python. Run its offline demo with
+`python -m examples.coding_harness --dry-run --headless --task 'Fix total'`.
 
 ## Explicit execution options and compatibility
 

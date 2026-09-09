@@ -3,87 +3,23 @@
 import asyncio
 import sys
 from copy import deepcopy
-from types import SimpleNamespace as NS
 
 import pytest
+from sdk_fakes import JsonNamespace as NS
 
 from slick.providers import ProviderError
 
 supported_python = pytest.mark.skipif(sys.version_info >= (3, 15), reason="LiteLLM Python range")
 
 
-def test_litellm_native_turn_uses_slick_chat_completions_protocol(monkeypatch):
-    from slick.providers import LiteLLMAPI
-    from slick.turns import ModelTurn, ToolResult, UserMessage
-
-    requests = []
-    native_response = {
-        "choices": [
-            {
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": "I will search.",
-                    "tool_calls": [
-                        {
-                            "id": "call-1",
-                            "type": "function",
-                            "function": {
-                                "name": "search",
-                                "arguments": '{"query":"pricing"}',
-                            },
-                        }
-                    ],
-                },
-            }
-        ],
-        "usage": {"prompt_tokens": 12, "completion_tokens": 3},
-    }
-
-    async def acompletion(**request):
-        requests.append(request)
-        return NS(model_dump=lambda **kwargs: native_response)
-
-    monkeypatch.setitem(sys.modules, "litellm", NS(acompletion=acompletion))
-
-    def search(query: str) -> str:
-        """Search documents."""
-        return query
-
-    provider = LiteLLMAPI("openai/test")
-    history = [UserMessage("Find pricing")]
-    response = asyncio.run(provider.aturn(history, tools=[search], instructions="Be concise."))
-
-    assert isinstance(response, ModelTurn)
-    assert response.provider == "litellm"
-    assert response.tool_calls[0].name == "search"
-    assert response.input_tokens == 12
-    assert requests[0]["messages"] == [
-        {"role": "system", "content": "Be concise."},
-        {"role": "user", "content": "Find pricing"},
-    ]
-    assert requests[0]["tools"][0]["function"]["name"] == "search"
-    assistant_message = native_response["choices"][0]["message"].copy()
-    assistant_message["tool_calls"] = [dict(assistant_message["tool_calls"][0])]
-
-    followup = [*history, response, ToolResult("call-1", "Found pricing.md")]
-    native_response["choices"][0]["finish_reason"] = "stop"
-    native_response["choices"][0]["message"] = {
-        "role": "assistant",
-        "content": "Found it.",
-        "tool_calls": None,
-    }
-    asyncio.run(provider.aturn(followup, tools=[search]))
-    assert requests[1]["messages"][-2] == assistant_message
-    assert requests[1]["messages"][-1] == {
-        "role": "tool",
-        "tool_call_id": "call-1",
-        "content": "Found pricing.md",
-    }
-
-
 def response(content="  answer\n", finish="stop", **message_fields):
-    message = {"content": content, "tool_calls": None, "function_call": None, "refusal": None}
+    message = {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": None,
+        "function_call": None,
+        "refusal": None,
+    }
     message.update(message_fields)
     return NS(choices=[NS(finish_reason=finish, message=NS(**message))])
 
@@ -125,7 +61,7 @@ def test_exact_text_options_and_configuration_are_preserved(monkeypatch, asynchr
     )
     options["response_format"]["type"] = "changed by caller"
     result = asyncio.run(provider.acall("input\n")) if asynchronous else provider.call("input\n")
-    assert result == "  answer\n"
+    assert result == ("  answer\n", [])
     assert requests == [
         {
             "model": "openai/private-model",
@@ -148,8 +84,8 @@ def test_provider_resolves_missing_credentials_and_unknown_model(monkeypatch):
     from slick.providers import LiteLLMAPI
 
     requests = []
-    install_sdk(monkeypatch, response(""), requests)
-    assert LiteLLMAPI("unusual/model", max_retries=2).call("prompt") == ""
+    install_sdk(monkeypatch, response("ok"), requests)
+    assert LiteLLMAPI("unusual/model", max_retries=2).call("prompt") == ("ok", [])
     assert requests[0]["model"] == "unusual/model"
     assert requests[0]["num_retries"] == 2
     assert "api_base" not in requests[0] and "api_key" not in requests[0]

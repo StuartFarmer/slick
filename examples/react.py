@@ -84,7 +84,8 @@ class Researcher:
             remaining=self.max_steps - self.steps,
             schema=TypeAdapter(Action).json_schema(),
         )
-        action = parse(await self.provider.acall(text), Action)
+        response, _ = await self.provider.acall(text)
+        action = parse(response, Action)
         if isinstance(action, Search):
             if action.tool not in self.tools:
                 raise ValueError(f"Tool is not allowlisted: {action.tool}")

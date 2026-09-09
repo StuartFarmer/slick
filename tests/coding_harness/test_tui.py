@@ -5,12 +5,10 @@ import hashlib
 import json
 import os
 import sys
-from dataclasses import replace
 
 import pytest
 
 pytest.importorskip("textual")
-
 from textual.app import App
 from textual.widgets import Input, ListView, RichLog, Static
 
@@ -19,9 +17,7 @@ from examples.coding_harness.tui import DetailModal, plain
 
 def test_external_output_is_plain_and_terminal_controls_are_removed():
     output = plain(
-        "[bold]literal[/bold]\x1b[31m red\x1b[0m "
-        "\x1b]8;;https://evil.invalid\x07link\x1b]8;;\x07"
-        "\x1b]52;c;clipboard\x07\x00\r\nend"
+        "[bold]literal[/bold]\x1b[31m red\x1b[0m \x1b]8;;https://evil.invalid\x07link\x1b]8;;\x07\x1b]52;c;clipboard\x07\x00\r\nend"
     )
     assert output.plain == "[bold]literal[/bold] red link\nend"
     assert not output.spans
@@ -92,9 +88,9 @@ def test_enter_repairs_real_demo_and_opens_result_and_diff(harness, size):
             assert result.status == "verified"
             assert result.repairs == 1
             assert all(check.command.exit_code == 0 for check in result.checks)
-            assert (harness.workspace_root / "pricing.py").read_text() == (
-                "def total(values):\n    return sum(values)\n"
-            )
+            assert (
+                harness.workspace_root / "pricing.py"
+            ).read_text() == "def total(values):\n    return sum(values)\n"
             assert not field.disabled
             results = harness.query_one("#results", ListView)
             results.focus()
@@ -176,26 +172,17 @@ class CommandProvider:
     def identity(self):
         return {"provider": "demo", "model": "command-test"}
 
-    async def aturn(self, history, *, tools, instructions=None):
-        from slick.turns import ModelTurn, ToolCall
-
+    async def acall(self, context, *, tools=None, tool_results=None):
         self.calls += 1
         calls = (
             [
-                ToolCall(f"command-{index}", "run_command", {"argv": argv})
+                {"id": f"command-{index}", "name": "run_command", "arguments": {"argv": argv}}
                 for index, argv in enumerate(self.commands)
             ]
             if self.calls == 1
             else []
         )
-        return ModelTurn(
-            "demo",
-            "command-test",
-            "Run commands" if calls else "Done",
-            calls,
-            [],
-            "tool_calls" if calls else "end_turn",
-        )
+        return ("Run commands" if calls else "Done", calls)
 
 
 async def wait_until(pilot, predicate):
@@ -218,8 +205,8 @@ def test_decisions_control_real_effects_and_exact_session_scope(harness, choice,
     command = [
         sys.executable,
         "-c",
-        "from pathlib import Path; "
-        "p=Path('allowed.txt'); p.write_text(p.read_text()+'x' if p.exists() else 'x')",
+        "from pathlib import Path; p=Path('allowed.txt'); "
+        "p.write_text(p.read_text()+'x' if p.exists() else 'x')",
     ]
     denied = [sys.executable, "-c", "from pathlib import Path; Path('denied.txt').touch()"]
     app = command_app(harness, [command, command, denied])
@@ -269,7 +256,6 @@ def test_cancel_or_quit_reaps_child_and_allows_followup(harness, quit_app):
                 await wait_until(pilot, pidfile.exists)
                 child_pid = int(pidfile.read_text())
                 assert field.disabled
-                # Bypassing the disabled widget must still not enqueue a second run.
                 app.post_message(Input.Submitted(field, "Overlapping task"))
                 await pilot.pause()
                 assert app.provider.calls == 1
@@ -315,12 +301,12 @@ def test_save_and_resume_restore_inert_history(harness, tmp_path):
             await pilot.press("enter")
             await asyncio.wait_for(harness.workers.wait_for_complete(), 10)
             assert path.is_file()
-            history_size = len(harness.agent.state.history)
+            history_size = len(harness.agent.session.history)
         saved = load_session(path)
         restored = HarnessApp(harness.provider, harness.workspace_root, harness.config, saved=saved)
         before = (harness.workspace_root / "pricing.py").read_bytes()
         async with restored.run_test() as pilot:
-            assert len(restored.agent.state.history) == history_size
+            assert len(restored.agent.session.history) == history_size
             assert restored.agent.state.last_result.status == "verified"
             assert not restored.query_one("#task", Input).disabled
             assert (harness.workspace_root / "pricing.py").read_bytes() == before
@@ -330,7 +316,7 @@ def test_save_and_resume_restore_inert_history(harness, tmp_path):
 
 def test_provider_failure_exposes_reason_and_returns_to_idle(harness):
     class FailingProvider(CommandProvider):
-        async def aturn(self, history, *, tools, instructions=None):
+        async def acall(self, context, *, tools=None, tool_results=None):
             raise RuntimeError("Provider unavailable: local test failure")
 
     app = command_app(harness, [])
@@ -353,10 +339,8 @@ def test_provider_failure_exposes_reason_and_returns_to_idle(harness):
 
 
 def test_compact_command_replaces_history_without_changing_files(harness):
-    from slick.turns import ModelTurn
-
     class SummaryProvider(CommandProvider):
-        async def aturn(self, history, *, tools, instructions=None):
+        async def acall(self, context, *, tools=None, tool_results=None):
             if not tools:
                 text = json.dumps(
                     {
@@ -367,8 +351,8 @@ def test_compact_command_replaces_history_without_changing_files(harness):
                         "next_steps": [],
                     }
                 )
-                return ModelTurn("demo", "command-test", text, [], [], "end_turn")
-            return await super().aturn(history, tools=tools, instructions=instructions)
+                return (text, [])
+            return await super().acall(context, tools=tools, tool_results=tool_results)
 
     app = command_app(harness, [])
     app.provider = SummaryProvider([])
@@ -379,7 +363,9 @@ def test_compact_command_replaces_history_without_changing_files(harness):
             field.value = "Inspect the task"
             await pilot.press("enter")
             await asyncio.wait_for(app.workers.wait_for_complete(), 10)
-            history = list(app.agent.state.history)
+            from examples.coding_harness.context import history_views
+
+            history = history_views(app.agent.session, app.agent.state, include_ready=True)
             before = (app.workspace_root / "pricing.py").read_bytes()
             field.value = "/compact"
             await pilot.press("enter")
@@ -388,31 +374,9 @@ def test_compact_command_replaces_history_without_changing_files(harness):
                 line.text for line in app.query_one("#transcript", RichLog).lines
             )
             assert app.agent.state.archived_histories[-1] == history
-            assert len(app.agent.state.history) == 1
+            assert len(app.agent.state.context_notes) == 1
             assert (app.workspace_root / "pricing.py").read_bytes() == before
             assert not field.disabled
-
-    asyncio.run(scenario())
-
-
-def test_reported_token_counts_are_visible(harness):
-    class UsageProvider(CommandProvider):
-        async def aturn(self, history, *, tools, instructions=None):
-            turn = await super().aturn(history, tools=tools, instructions=instructions)
-            return replace(turn, input_tokens=12, output_tokens=3)
-
-    app = command_app(harness, [])
-    app.provider = UsageProvider([])
-
-    async def scenario():
-        async with app.run_test() as pilot:
-            app.query_one("#task", Input).value = "Return reported usage"
-            await pilot.press("enter")
-            await asyncio.wait_for(app.workers.wait_for_complete(), 10)
-            await pilot.pause()
-            output = "".join(line.text for line in app.query_one("#transcript", RichLog).lines)
-            assert '"input_tokens": 12' in output
-            assert '"output_tokens": 3' in output
 
     asyncio.run(scenario())
 
@@ -421,7 +385,6 @@ def test_reported_token_counts_are_visible(harness):
 def test_completion_reports_real_verification_file_edits(harness, status):
     from examples.coding_harness.state import HarnessConfig
     from examples.coding_harness.tui import HarnessApp
-    from slick.turns import ModelTurn, ToolCall
 
     source = harness.workspace_root / "pricing.py"
     source.write_text("def total(values):\n    return sum(values)\n")
@@ -429,30 +392,23 @@ def test_completion_reports_real_verification_file_edits(harness, status):
     digest = hashlib.sha256(tests.read_bytes()).hexdigest()
 
     class EditTestsProvider(CommandProvider):
-        async def aturn(self, history, *, tools, instructions=None):
+        async def acall(self, context, *, tools=None, tool_results=None):
             self.calls += 1
             calls = []
             if self.calls == 1:
                 calls = [
-                    ToolCall(
-                        "edit-test",
-                        "edit_file",
-                        {
+                    {
+                        "id": "edit-test",
+                        "name": "edit_file",
+                        "arguments": {
                             "path": "test_pricing.py",
                             "old": "import unittest",
                             "new": "import unittest\n# Reviewed by the harness",
                             "expected_sha256": digest,
                         },
-                    )
+                    }
                 ]
-            return ModelTurn(
-                "demo",
-                "command-test",
-                "Reviewed the tests",
-                calls,
-                [],
-                "tool_calls" if calls else "end_turn",
-            )
+            return ("Reviewed the tests", calls)
 
     config = harness.config if status == "verified" else HarnessConfig()
     app = HarnessApp(EditTestsProvider([]), harness.workspace_root, config)
@@ -475,7 +431,9 @@ def test_failed_startup_quits_with_nonzero_result(tmp_path):
     from examples.coding_harness.state import HarnessConfig
     from examples.coding_harness.tui import HarnessApp
 
-    app = HarnessApp(CommandProvider([]), tmp_path / "missing-workspace", HarnessConfig())
+    invalid = tmp_path / "workspace-file"
+    invalid.write_text("not a directory")
+    app = HarnessApp(CommandProvider([]), invalid, HarnessConfig())
 
     async def scenario():
         async with app.run_test() as pilot:

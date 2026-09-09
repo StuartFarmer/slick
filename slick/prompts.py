@@ -24,6 +24,7 @@ from jinja2 import Template as JinjaTemplate
 from pydantic import TypeAdapter, ValidationError
 
 from .providers import Provider, get_command
+from .tools._protocol import validate_response
 
 TEMPLATE_ROOT = Path("prompts")
 LOG_DIR = Path("logs/prompts")
@@ -234,7 +235,7 @@ def _build(fn, template, model, provider, max_repairs, cache, log_dir):
             if cached is not _MISSING:
                 return cached
             for attempt in range(repairs + 1):
-                response = await execute(text)
+                response = _final_text(await execute(text))
                 try:
                     return run.accept(response)
                 except ValidationError as exc:
@@ -256,7 +257,7 @@ def _build(fn, template, model, provider, max_repairs, cache, log_dir):
             if cached is not _MISSING:
                 return cached
             for attempt in range(repairs + 1):
-                response = execute(text)
+                response = _final_text(execute(text))
                 try:
                     return run.accept(response)
                 except ValidationError as exc:
@@ -470,3 +471,15 @@ def _digest(prompt_text: str, model) -> str:
 
 def _name(annotation: Any) -> str:
     return getattr(annotation, "__name__", str(annotation))
+
+
+def _final_text(response):
+    try:
+        text, requests = validate_response(response)
+    except ValueError as exc:
+        raise PromptError(str(exc)) from exc
+    if requests:
+        raise PromptError(
+            "This prompt expects final text; handle tool requests in application code."
+        )
+    return text

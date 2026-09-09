@@ -1,10 +1,10 @@
 # Coding harness example
 
-An ordinary `CodingAgent` class combines Jinja instructions, native model turns,
+An ordinary `CodingAgent` class combines Jinja instructions, explicit provider calls,
 bound Python tools, workspace state, and a bounded verification/repair loop.
 The same agent runs in a simple Textual TUI or headlessly. All application code
 and templates live under `examples/`; the installed Slick package supplies only
-the renderer, callable tools, and provider transport.
+the renderer, callable tools, provider transport, and Session interaction bookkeeping.
 
 ## Run with a model
 
@@ -37,7 +37,7 @@ python -m examples.coding_harness --provider litellm --model 'openrouter/openai/
 LiteLLM needs Python 3.10–3.14. Its `openrouter/` prefix selects the OpenRouter
 route; the remaining `openai/gpt-oss-120b:nitro` is the OpenRouter model ID.
 See [LiteLLM's OpenRouter setup](https://docs.litellm.ai/docs/providers/openrouter).
-Slick translates common history and tool records to LiteLLM's Chat Completions
+Slick translates tool request/result dictionaries to LiteLLM's Chat Completions
 format. The harness executes tools and retains its verification/repair loop.
 Saved sessions retain the provider and model; credentials stay in the environment.
 
@@ -112,7 +112,7 @@ python -m examples.coding_harness --dry-run --headless --task 'Fix the total cal
 | `/compact` | Summarize idle history into a validated checkpoint |
 | `/save PATH` | Save an idle session to a new file outside the workspace |
 
-The transcript, status, elapsed time and reported token usage remain visible while
+The transcript, status and elapsed time remain visible while
 a task runs. There is one active task. Tool/check output and diffs have scrollable
 detail views. Token streaming is not implemented. A terminal at least 80×24 is
 recommended; smaller terminals show a resize hint.
@@ -161,15 +161,17 @@ ignored files, external dependencies and environmental changes are outside that
 guarantee. Concurrent external filesystem writes are not transactionally locked.
 
 Context budgets count serialized characters, including instructions, tool schemas
-and opaque provider records; they are not exact model token budgets. Compaction
+and pending tool results; they are not exact model token budgets. Compaction
 uses a separate tool-free request, validates the summary, then atomically replaces
-active history. A failed summary keeps the original history; an oversized input
-stops before sending it. Original histories remain in memory for explicit saving.
+active context notes and advances a cursor over Session history. A failed summary
+keeps the original context; an oversized input stops before sending it. Session
+history and ready results remain intact for inspection and explicit saving.
 
 ## Save and resume
 
-`/save /absolute/path/session.json` writes a versioned JSON file with history,
-archives, config, counters, workspace metadata and edit observations. The path must
+`/save /absolute/path/session.json` writes a version 3 JSON file with a nested Slick
+Session snapshot, application context notes, archives, config, counters, workspace
+metadata and edit observations. The path must
 be new and outside the workspace. Publication is atomic and the file is mode 0600;
 an existing destination or symlink is rejected. Sessions are capped at 20 MiB.
 They contain conversation and observed source/output, so choose the path accordingly.
@@ -181,9 +183,15 @@ python -m examples.coding_harness --resume /absolute/path/session.json
 python -m examples.coding_harness --resume /absolute/path/session.json --headless --task 'Continue the fix'
 ```
 
-Resume uses the saved provider/model/root/config; launch overrides are rejected.
+Resume defaults to the saved provider/model/root/config. Override the provider and
+model with `--provider anthropic --model MODEL`, or use `--model MODEL` alone to
+change models on the same provider. Changing providers requires an explicit model.
+Workspace/config overrides and `--dry-run` are rejected on resume.
 The saved workspace and Git repository must still exist; resume does not recreate them.
-Loading validates records and complete tool/result groups and never replays actions.
+Loading validates the snapshot and never executes tools. On the next task, pending
+requests execute and recorded results are reused. Version 1 and 2 files migrate
+on load: old history remains context, and only explicit pending results become
+ready work. Archived actions are never scheduled, and source files are not rewritten.
 Changed HEAD or file fingerprints invalidate saved verification and add a fresh
 workspace observation. A saved demo session cannot resume after its temporary
 workspace has been removed. Nothing is saved automatically.
@@ -192,35 +200,47 @@ workspace has been removed. Nothing is saved automatically.
 
 | File | Responsibility |
 | --- | --- |
-| `agent.py` | Class state, native turns, sequential dispatch, budgets, repair decisions |
+| `agent.py` | Session calls, tool budgets/UI events, verification and repair decisions |
 | `workspace.py`, `process.py` | Bound Python tools, command decisions and subprocess cleanup |
 | `verification.py` | Real check results and file fingerprints |
 | `context.py` | Jinja instructions, selected skills, history presentation and size bounds |
 | `session.py`, `state.py` | Plain application records and explicit JSON persistence |
 | `tui.py`, `__main__.py` | Interaction, events, CLI and resource lifetime |
-| `demo.py` | Offline scripted turns and disposable fixture |
+| `demo.py` | Offline scripted responses and disposable fixture |
 | `../prompts/coding_harness/` | System/task/check/summary/checkpoint templates and Python skill |
 
 Add a normal annotated, documented method to `Workspace` and pass its bound method
-in `CodingAgent`'s `prepare_tools` list. The method keeps access to instance state;
+in `CodingAgent`'s `Session(..., tools=[...])` list. The method keeps access to instance state;
 Slick derives its schema and validates arguments/results. No decorator is needed.
 Edit the Jinja files to change instructions. Add a skill template to the explicit
 `SKILLS` mapping to make it selectable. Retrieval, memory, extra application methods
 and alternate verification are ordinary Python changes here.
 
-Core `OpenAIAPI.aturn`, `AnthropicAPI.aturn`, and `LiteLLMAPI.aturn` perform one
-request. This app owns the loop and history. OpenRouter is available
-through LiteLLM. CLI harness providers, parallel tool execution, durable execution,
-multimodal inputs and hosted/server tools are outside this example.
+`CodingAgent.session` owns model responses, tool requests and their results.
+`Session.acall(context)` records a response and supplies ready results automatically;
+`Session.resolve(request)` executes and records one tool. The harness keeps a short
+loop around it for budgets and TUI events. Simpler apps can use
+`await session.resolve_pending()`.
+
+Application context notes contain tasks, verification feedback and checkpoints.
+The Jinja renderer combines those with selected Session observations and never
+replays entire previously rendered prompts. Compaction calls the raw provider
+separately, preserving the main Session's pending/ready work. Workspace permissions,
+verification, repair limits and command cleanup remain ordinary application code.
+
+OpenRouter is available through LiteLLM. CLI harness providers, parallel tool
+execution, durable execution, multimodal inputs and hosted/server tools are
+outside this example. Provider capability limits still apply when changing models.
 
 ## Tests
 
 ```bash
 python -m pytest tests/coding_harness
-python -m pytest tests/test_turns.py tests/test_native_turns.py tests/test_sdk_transport.py
+python -m pytest tests/test_session_calls.py tests/test_session_tools.py tests/test_session_snapshot.py
+python -m pytest tests/test_tool_protocol.py tests/test_tool_providers.py tests/test_tool_exchange.py tests/test_sdk_transport.py
 ```
 
-Tests use scripted turns, temporary repositories and real local processes. Provider
+Tests use scripted responses, temporary repositories and real local processes. Provider
 transport tests use mock HTTP with the optional installed SDKs. UI tests require
 the example requirements; other tests and the headless demo run without Textual.
 No automated tests call paid endpoints.

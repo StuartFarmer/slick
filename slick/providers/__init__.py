@@ -1,21 +1,13 @@
-"""Providers for CLI tools, remote inference, and local inference endpoints.
+"""API and CLI providers; optional SDKs load only when called."""
 
-Importing or constructing a provider does not import optional SDKs or execute
-requests. A model ID selects a model within the configured provider.
-"""
-
-from ._api import AnthropicAPI, OpenAIAPI, OpenRouterAPI
-from ._base import Provider, ProviderError
-from ._command import (
+from .api import AnthropicAPI, LiteLLMAPI, OpenAIAPI, OpenRouterAPI
+from .base import Provider, ProviderError
+from .cli_tool import (
     ClaudeCLI,
     CodexCLI,
     Command,
     ExecutionResult,
-    get_command,
-    get_default,
-    set_default,
 )
-from ._litellm import LiteLLMAPI
 
 __all__ = [
     "AnthropicAPI",
@@ -28,7 +20,4 @@ __all__ = [
     "OpenRouterAPI",
     "Provider",
     "ProviderError",
-    "get_command",
-    "get_default",
-    "set_default",
 ]

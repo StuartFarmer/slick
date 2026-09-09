@@ -3,8 +3,7 @@
 import argparse
 from pathlib import Path
 
-from slick import prompts
-from slick.providers import AnthropicAPI, OpenAIAPI, get_command
+from slick import prompts, providers
 
 
 def parser(description: str) -> argparse.ArgumentParser:
@@ -38,11 +37,10 @@ def provider_from_args(args, argument_parser, demo):
     if args.provider in {"openai", "anthropic"}:
         if not args.model:
             argument_parser.error("--model is required for API providers")
-        provider = OpenAIAPI if args.provider == "openai" else AnthropicAPI
+        provider = providers.OpenAIAPI if args.provider == "openai" else providers.AnthropicAPI
         return provider(model=args.model, timeout=args.timeout)
-    provider = get_command(args.provider, args.model)
-    provider.timeout = args.timeout
-    return provider
+    provider = providers.CodexCLI if args.provider == "codex" else providers.ClaudeCLI
+    return provider(model=args.model, timeout=args.timeout)
 
 
 class ScriptedProvider:

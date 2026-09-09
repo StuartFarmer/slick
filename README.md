@@ -27,8 +27,10 @@ pip install 'slick-ai[litellm]'        # optional multi-provider SDK (no proxy s
 ```
 
 API providers use `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY` when called. Model IDs
-are explicit application choices. Importing Slick or constructing an API provider
-does not load its SDK, require credentials, or make a request.
+are explicit application choices. Imports and provider construction do not load
+optional SDKs or make requests. Each SDK loads when its provider sends a request,
+so install the corresponding extra before calling it. Configuration passes through
+without constructor validation; the SDK handles invalid settings.
 
 The LiteLLM extra supports Python 3.10–3.14 and LiteLLM 1.100.x. Its SDK dependencies
 are optional; the base install does not include provider SDKs.
@@ -66,8 +68,8 @@ and template edits take effect on the next render. Leading/trailing whitespace
 is stripped from the rendered prompt. Provider response text is returned unchanged.
 
 `parse` accepts Pydantic-compatible types and raises `pydantic.ValidationError`
-for invalid structured output. It retains support for fenced JSON, prose around
-JSON, and compatible bare scalar values. It never calls a provider or repairs output.
+for invalid structured output. Structured responses must be JSON, including quoted
+JSON strings for string literals. It never calls a provider or repairs output.
 
 ## Reusable prompts and application classes
 
@@ -108,7 +110,27 @@ are ordinary files; see the [runnable example](examples/question_answerer.py).
 
 ## Python functions as tools
 
-Prepare ordinary functions or bound methods using their annotations and docstrings:
+Use `@tool` to create a tool from a function's name, docstring, and annotations:
+
+```python
+from slick import tool
+
+documents = {"intro": "Slick renders Jinja templates."}
+
+@tool
+def lookup(key: str) -> str:
+    """Retrieve a document by its key."""
+    return documents[key]
+
+text = lookup.invoke({"key": "intro"})
+```
+
+`@tool()` also works. Override metadata with
+`@tool(name="read_document", description="Read a document.")`; both overrides
+default to `None`, which uses the function's metadata. The decorator returns a
+`Tool` instance, ready to pass to a session or provider.
+
+You can also prepare ordinary functions or bound methods without decorating them:
 
 ```python
 from slick.tools import prepare_tools
@@ -129,31 +151,29 @@ text = tools["read"].invoke({"key": "intro"})
 text = await tools["read"].ainvoke({"key": "intro"})
 ```
 
-Preparation validates the entire list without executing the functions. Names must
-be unique, and each tool needs a description and typed input parameters. Use
-`Tool(documents.read, name="read_document", description="...")` from `slick` for
-explicit overrides. Direct Python calls such as `documents.read("intro")` are
-unchanged. The selected bound methods retain their instance and its state.
+Preparation builds schemas without executing functions. Names and descriptions are
+used as supplied; missing docstrings become empty descriptions. Duplicate names
+use the last supplied function. Use `tool(documents.read, name="read_document")`
+for an override, or `Tool(documents.read, name="read_document", description="...")`
+to supply both fields explicitly. Bound methods retain their instance and state.
 
-Tool arguments are JSON dictionaries. Slick rejects extra arguments and invalid
-types before execution, constructs declared nested Pydantic models, and preserves
-Python defaults when arguments are omitted. Nullable parameters without defaults
-are still required. Strings, integers, finite floats, booleans, null, typed lists,
-string-keyed dictionaries, literals, enums, Pydantic models, and TypedDicts are
-supported. `Annotated[T, Field(...)]` supplies descriptions and constraints.
+Pydantic generates the parameter schema directly from the callable. Annotations
+and `Annotated[T, Field(...)]` describe inputs to the model; they do not validate
+or convert arguments during invocation. Arguments go straight to `function(**arguments)`,
+using Python parameter names and defaults. Nested dictionaries stay dictionaries;
+construct Pydantic models inside the function if needed. Python, the function,
+or the provider handles invalid input when it encounters it.
 
-Declared return types are validated. Strings are returned unchanged; other
-supported results become JSON text. Without a return annotation, the result must
-already be text or JSON-compatible data. Arbitrary objects are never silently
-converted with `str()`. Binary/date/path types, tuples, sets, untyped inputs, and
-other deferred types are listed in the [tool contract](docs/superpowers/specs/2026-09-07-callable-tools.md).
+Return annotations are not enforced. Strings pass through unchanged; other
+results use Pydantic's standard JSON serialization. There are no custom checks
+for JSON keys, nonfinite numbers, defaults, names, or dictionary fields.
 
-`ToolError` exposes `.name` and `.phase` (`definition`, `arguments`, `execution`,
-or `result`) and preserves the underlying exception as its cause. Functions are
-never retried automatically. A result error occurs after the function has run;
-it does not undo its effects. `ainvoke` awaits async functions and runs sync
-functions inline. Wrap blocking work explicitly with `asyncio.to_thread` when
-needed. Cancellation propagates normally.
+`ToolError` exposes `.name` and `.phase` (`definition`, `execution`, or `result`)
+and preserves the underlying exception as its cause. Functions are never retried
+automatically. A serialization error occurs after the function has run and does
+not undo its effects. `ainvoke` awaits async functions and runs sync functions
+inline. Wrap blocking work with `asyncio.to_thread` when needed. Cancellation
+propagates normally.
 
 API providers accept these functions through `tools=` and convert their schemas
 into the native API format. `Session` coordinates execution and result submission.
@@ -253,10 +273,10 @@ does not close them. Raw `provider.call/acall` remains available independently.
 Run the complete offline example with `python -m examples.session`, or see the
 [coding harness](examples/coding_harness/README.md) for budgets, verification and a TUI.
 
-## Existing executing decorator
+## Executing decorator
 
-The lowercase `@prompt` decorator remains available with its existing behavior:
-it combines rendering, execution and parsing. Use uppercase `Prompt` for a
+The lowercase `@prompt` decorator combines rendering, execution and parsing.
+Supply a configured `provider=` to execute it. Use uppercase `Prompt` for a
 provider-independent renderer.
 
 ```python
@@ -287,8 +307,8 @@ Parameters and defaults supply template variables. The return annotation supplie
 the output contract. `str` requests plain text; other types add JSON instructions
 through `{{ output_format }}` (appended if omitted) and are validated locally.
 This release uses prompt instructions and local validation, not provider-native
-constrained decoding. Invalid results raise `PromptError`; its `.response` holds
-the rejected text and its cause holds the validation error.
+constrained decoding. Invalid results raise Pydantic's `ValidationError` directly.
+The application owns retries and repairs.
 
 A `def` declaration uses `provider.call`; an `async def` declaration uses
 `provider.acall`. Unsupported modes fail clearly; Slick never runs a blocking
@@ -325,29 +345,32 @@ other CLI tools can be integrated through a `Command` subclass; they do not yet
 have bundled adapters.
 
 ```python
-from slick.providers import Provider, OpenAIAPI, AnthropicAPI, CodexCLI, ClaudeCLI, get_command
+from slick.providers import Provider, OpenAIAPI, AnthropicAPI, CodexCLI, ClaudeCLI
 
 reader = OpenAIAPI(model="YOUR_OPENAI_MODEL_ID", timeout=60, max_output_tokens=2048)
 writer = AnthropicAPI(model="YOUR_ANTHROPIC_MODEL_ID")
 coder: Provider = CodexCLI(workdir=".")
 claude = ClaudeCLI(workdir=".")
-default_cli = get_command()         # configured CLI provider and model
 ```
 
 All built-in providers inherit `Provider`. Both `call(context, tools=None,
 tool_results=None)` and `acall(...)` return `(text, tool_requests)`. Tool arguments
 are keyword-only. Text-only responses use an empty request list.
 
+Providers are ordinary classes with handwritten constructors. The implementation
+lives in `slick/providers/base.py`, `api.py`, and `cli_tool.py`; `__init__.py`
+exports the provider classes.
+
 Native API adapters use OpenAI Responses, Anthropic Messages, or Chat Completions.
-They validate input before opening a client, perform one exchange, and never
-execute Python functions. Refused, incomplete, or unsupported output raises
-`ProviderError`; transport exceptions remain accessible through the chained cause.
+They pass input to the SDK and extract available text and function calls. Status,
+finish reasons, and extra response blocks are not validated. Partial text is
+returned as supplied; unsupported blocks are ignored. SDK and decoding exceptions
+raise `ProviderError` with the original exception as their cause.
 
 Native SDK transport retries default to zero; set `max_retries=` explicitly to enable
-them. Owned native SDK clients are created and closed per call. For connection reuse,
-pass `client=` and/or `async_client=` from the provider's SDK; the application
-owns and closes them. Slick applies its timeout/retry settings using the SDK's
-`with_options` method. Provider objects retain configuration, not conversation history.
+them. Each native API call creates and closes its own SDK client with the configured
+timeout and retry settings. `call` uses the synchronous SDK and `acall` uses the
+asynchronous SDK. Provider objects store configuration, not clients or conversation history.
 
 CLI providers retain their commands and permissions. `acall` uses native async
 subprocesses. Async timeout or cancellation kills and reaps the owned process;
@@ -360,10 +383,18 @@ Codex receives its sandbox flag; Claude's existing command controls permissions
 and does not enforce the `sandbox` argument. Authentication and subscription/API
 billing are owned by the invoked CLI.
 
-`Command` is the abstract CLI provider base. `get_command`, `get_default`, and
-`set_default` retain CLI-only default selection: explicit arguments take priority,
-then `set_default(provider=..., model=...)`, then `SLICK_PROVIDER` / `SLICK_MODEL`,
-then the built-in default. Construct API providers explicitly with a model ID.
+`Command` runs an ordinary command with the prompt on stdin and returns stdout.
+It shares process execution, timeout, and cancellation handling between CLI providers.
+`ClaudeCLI` adds Claude's model flag; `CodexCLI` builds `codex exec` arguments and
+extracts the final message from JSONL output.
+
+All `command=` values use shell-style quoting and are split into arguments without
+launching a shell. For a Python wrapper, pass `command='python "path/to/wrapper.py"'`;
+the provider does not choose an interpreter from the filename. The process starts
+in `workdir`, so Codex needs no additional `--cd` flag.
+
+Construct providers explicitly. API providers require a model ID; CLI providers
+use the invoked CLI's model default when `model` is omitted.
 
 A custom provider implements `call(context)` and/or `acall(context)`, returning
 `(text, tool_requests)`. Providers supporting tools also accept `tools=` and
@@ -391,11 +422,8 @@ tool requests. Defaults are `timeout=60`, `max_output_tokens=2048`, and `max_ret
 The retry setting controls SDK transport retries; OpenRouter's own upstream routing
 is managed by its service.
 
-For connection reuse, supply an OpenAI SDK `client=` or `async_client=`. Slick
-always sets the OpenRouter endpoint. An explicit key takes precedence over
-`OPENROUTER_API_KEY`. One of those keys is required even with an injected client;
-Slick never carries its existing credentials over to OpenRouter.
-The application owns injected clients; Slick closes clients it creates itself.
+Slick creates an OpenAI SDK client pointed at the OpenRouter endpoint for each call.
+An explicit `api_key` takes precedence over `OPENROUTER_API_KEY`; one is required.
 
 ```bash
 slick call "Explain generators" --provider openrouter --model PROVIDER/MODEL
@@ -438,10 +466,11 @@ output token limit is imposed. Provider-specific settings pass to LiteLLM;
 model and provider capabilities determine whether they are supported.
 
 Calls use the SDK's `completion`/`acompletion` functions without requiring a proxy.
-They reject truncated, refused, or malformed responses with `ProviderError`,
-retaining provider exceptions as chained causes. Text is returned unchanged inside
-the tuple. Tools and their results use the same Chat Completions conversion as
-OpenRouter. Streaming and fallback routing cannot be set in `options`.
+They return the first choice's available text and tool calls, including partial
+output, using the same Chat Completions conversion as OpenRouter. `options` is an
+ordinary dictionary passed through without copying or validation. Its entries
+override request defaults; explicit `api_base` and `api_key` fields take precedence.
+Unsupported options or response formats fail in the SDK or during decoding.
 Slick requests `drop_params=False`, but individual LiteLLM provider adapters can
 still translate or filter parameters.
 
@@ -454,8 +483,8 @@ network activity. See the [cost-map loader](https://github.com/BerriAI/litellm/b
 LiteLLM's `chatgpt/` and `github_copilot/` providers manage their own authentication;
 they do not run your installed CLI. Their availability and behavior are
 provider-specific. The evaluated ChatGPT adapter injects default instructions and
-discards output token limits, so Slick rejects those explicit limit options for
-`chatgpt/`. Use `CodexCLI` or `ClaudeCLI` when you want execution through that installed CLI.
+discards output token limits. Slick passes these options through to the SDK.
+Use `CodexCLI` or `ClaudeCLI` when you want execution through that installed CLI.
 
 ## Tool requests and results
 
@@ -525,36 +554,36 @@ Results contain the originating request because an ID alone does not tell a fres
 provider instance the function name or its arguments. There is no separate outgoing
 `tool_calls` argument. Dictionaries survive JSON save/load and can be submitted to
 another instance without replaying conversation history. `ToolRequest` and
-`ToolResult` in `slick.tools` are optional TypedDict annotations, not wrapper objects.
+`ToolResult` in `slick.tools` are optional TypedDict annotations. Provider and
+session APIs use plain dictionaries.
 
 `content` is serialized text. Tool invocation already converts structured return
 values to JSON; do not encode that text twice. `is_error` defaults to false.
-Malformed model JSON arguments retain their raw string and an `argument_error`;
-return an error result without executing them. Anthropic's object-only tool input
-cannot represent malformed raw JSON from another provider and is rejected explicitly.
+JSON syntax errors retain their raw string and an `argument_error`;
+return an error result without executing them. Anthropic expects object input;
+its SDK or API handles malformed raw JSON passed from another provider.
 
-Slick validates dictionary fields and unique IDs within each batch. It does not
-remember earlier IDs or infer missing results. The application chooses which
-requests to answer, in what order, and with what context. Empty context is allowed
-with results; an empty call with no results fails locally. Results may be supplied
-with `tools=[]` to make no functions available for the next response.
+Request and result dictionaries pass through without field or uniqueness checks.
+JSON arguments use ordinary `json.loads` behavior. The application chooses which
+requests to answer, in what order, and with what context. Empty context can be used
+with results; providers handle empty calls. Results may be supplied with `tools=[]`
+to make no functions available for the next response.
 
 Provider converters build the corresponding assistant tool requests and outputs
 internally. OpenAI uses `function_call_output`, Anthropic uses `tool_result`, and
 Chat Completions uses tool-role messages. OpenAI definitions use `strict=False`
-to retain Python optional/default arguments; local Tool validation remains strict.
+to retain Python optional/default arguments.
 
 This portable interface covers text and local function tools. It does not expose
-usage metadata, hosted tools, media, or native reasoning replay. Responses that
-combine tool requests with reasoning data requiring replay raise `ProviderError`
-instead of silently dropping that data. Final text from reasoning responses remains
-supported. Command providers return `(text, [])` and reject nonempty Python tools
-or tool results before launching a process.
+usage metadata, hosted tools, media, or native reasoning replay. Decoders extract
+text and function calls and ignore other blocks, including reasoning data.
+Command providers use only the context and return `(text, [])`; `tools` and
+`tool_results` are ignored.
 
 The former `aturn`, turn dataclasses, and provider history validation have been
 removed. Migrate string consumers to `text, requests = ...`; prompt decorators
 still return their declared Python output type and reject pending tool requests
-before parsing, repair, or caching. `Prompt`, `render`, and `parse` remain independent
+before parsing or caching. `Prompt`, `render`, and `parse` remain independent
 text operations.
 
 The [coding harness example](examples/coding_harness/README.md) adds error recovery,
@@ -562,37 +591,34 @@ cancellation, workspace tools, verification, saved app state, and a TUI as ordin
 Python. Run its offline demo with
 `python -m examples.coding_harness --dry-run --headless --task 'Fix total'`.
 
-## Explicit execution options and compatibility
+## Explicit execution options
 
-`@prompt(provider=...)` and new async declarations default to **no disk logging,
-no caching, and no automatic output repair**. Provider selection is fixed on the
-decorator; passing both `provider=` and `model=` or overriding a modern declaration
-with per-call `model=` raises an error.
+All `@prompt` declarations default to **no disk logging and no caching**.
+The decorator uses the supplied `provider=` directly and never repairs a response.
+The legacy `model=` decorator option, per-call model overrides, and implicit
+default-provider selection are removed. `model` is now an ordinary template variable.
 
 Explicit options remain available:
 
 ```python
-@prompt(provider=provider, template="summarize.j2", max_repairs=1)
+@prompt(provider=provider, template="summarize.j2", log_dir="logs/summaries")
 def summarize(document: str) -> Summary:
-    """Summarize a document, allowing one formatting repair."""
+    """Summarize a document and log the accepted exchange."""
 ```
 
 `log_dir=` opts into prompt/response files. `cache=True` opts into reuse of accepted
-responses (under `log_dir` or `LOG_DIR`). `max_repairs=` permits additional provider
-calls after validation failure; it is separate from SDK transport retries.
-`output=` on a text-returning function explicitly saves its response to a file.
+responses (under `log_dir` or `LOG_DIR`). Each cache miss makes one provider call;
+parsing failures propagate to the application or session. There is no `max_repairs=`
+option or prompt repair loop.
+`output=` explicitly saves the accepted response to a file, preserving the original
+text, including whitespace or JSON. It is a wrapper option, not a template variable.
 Caching is an application decision, especially for harnesses or external state.
 
-Persistent calls need a stable, JSON-serializable provider `identity()` excluding
-secrets, or legacy `provider`/`model` metadata. Built-in API adapters provide one.
-Injected clients with different endpoints or external state need separate cache
-directories or an application-defined identity; Slick does not inspect credentials
-or infer those differences. Accepted responses are written only after validation.
-
-Existing **synchronous** bare `@prompt` and `@prompt(model=...)` declarations keep
-their original defaults: disk logging, caching, one repair, per-call `model=`
-overrides, and default model resolution. `get_command`, `set_default`, environment
-settings, and the CLI continue working.
+Persistent calls use the provider's JSON-serializable `identity()` to name their
+directory. Built-in providers supply it; custom providers using logging or caching
+implement it themselves. Accepted structured responses are written only after parsing.
+Template errors, bad function arguments, and missing provider methods propagate
+directly from Jinja or Python.
 
 ## Examples
 
@@ -625,8 +651,7 @@ use shared Jinja includes. To use a real provider, set `TEMPLATE_ROOT` to
 ## CLI and development
 
 ```bash
-slick provider
-slick call "summarize this"
+slick call "summarize this" --provider codex
 cat document.md | slick call --provider codex
 slick call "Explain generators" --provider litellm --model ollama_chat/qwen3:8b --api-base http://localhost:11434
 slick call "Summarize this" --provider openai --model YOUR_MODEL_ID
@@ -638,8 +663,8 @@ poetry run ruff check slick tests examples
 
 Explicit `litellm`, `openai`, `anthropic`, and `openrouter` CLI choices require `--model` and use
 provider environment credentials. `--api-base` is available only with `litellm`.
-Omitting `--provider` and the `slick provider` command show the configured CLI defaults;
-`get_command` remains the Codex/Claude resolver.
+`--provider` is required. For `codex` and `claude`, `--model` is optional and
+omitting it uses the invoked CLI's model default.
 
 Ordinary tests use fake SDK clients and local Python subprocesses. Optional SDK
 transport tests run when their API/LiteLLM extras are installed, with external

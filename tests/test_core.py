@@ -4,7 +4,7 @@ import asyncio
 import inspect
 
 import pytest
-from jinja2 import UndefinedError
+from jinja2 import TemplateNotFound, UndefinedError
 from pydantic import BaseModel, ValidationError
 
 import slick
@@ -55,14 +55,14 @@ def test_render_composes_history_macros_and_includes_without_execution(root):
     assert slick.render("chat.j2", name="Ada", messages=[]).startswith("Be precise.")
     with pytest.raises(UndefinedError):
         slick.render("chat.j2", messages=[])
-    with pytest.raises(slick.PromptError, match=r"missing\.j2"):
+    with pytest.raises(TemplateNotFound, match=r"missing\.j2"):
         slick.render("missing.j2")
     assert not (root / "logs").exists()
 
 
 def test_parse_is_shared_and_does_not_call_a_provider():
     assert slick.parse("  exact text\n") == "  exact text\n"
-    assert slick.parse("```json\n[1, 2]\n```", list[int]) == [1, 2]
+    assert slick.parse("[1, 2]", list[int]) == [1, 2]
     assert slick.parse('{"headline":"H", "points":[]}', Summary).headline == "H"
     with pytest.raises(ValidationError):
         slick.parse('{"headline": []}', Summary)
@@ -100,17 +100,16 @@ def test_provider_calls_do_not_implicitly_cache_log_or_rewrite(root, capsys):
     assert str(inspect.signature(answer)) == "(question: str, provider: str = 'context') -> str"
 
 
-def test_modern_invalid_output_is_not_repaired_and_preserves_response(root):
+def test_invalid_output_is_not_repaired_and_preserves_response(root):
     provider = FakeProvider("invalid")
 
     @slick.prompt(provider=provider)
     def summarize(document: str) -> Summary:
         """{{ document }}\n{{ output_format }}"""
 
-    with pytest.raises(slick.PromptError) as caught:
+    with pytest.raises(ValidationError) as caught:
         summarize("data")
-    assert caught.value.response == "invalid"
-    assert isinstance(caught.value.__cause__, ValidationError)
+    assert caught.value.errors()[0]["input"] == "invalid"
     assert len(provider.calls) == 1
     assert provider.calls[0].count("# Output Format") == 1
     assert not (root / "logs").exists()
@@ -118,7 +117,7 @@ def test_modern_invalid_output_is_not_repaired_and_preserves_response(root):
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_explicit_cache_logs_only_accepted_typed_output(root, asynchronous):
-    provider = FakeProvider('{"headline":"H", "points":[]}')
+    provider = FakeProvider("invalid")
 
     def declaration(document: str) -> Summary:
         """{{ document }}"""
@@ -129,6 +128,12 @@ def test_explicit_cache_logs_only_accepted_typed_output(root, asynchronous):
     fn = slick.prompt(provider=provider, cache=True, log_dir=root / "chosen")(
         async_declaration if asynchronous else declaration
     )
+    with pytest.raises(ValidationError):
+        asyncio.run(fn("x")) if asynchronous else fn("x")
+    assert len(provider.calls) == 1
+    assert [path.name for path in (root / "chosen").glob("*/*")] == ["prompt.md"]
+
+    provider.response = '{"headline":"H", "points":[]}'
     if asynchronous:
 
         async def run():
@@ -138,7 +143,7 @@ def test_explicit_cache_logs_only_accepted_typed_output(root, asynchronous):
     else:
         first, second = fn("x"), fn("x")
     assert first == second == Summary(headline="H", points=[])
-    assert len(provider.calls) == 1
+    assert len(provider.calls) == 2
     assert len(list((root / "chosen").glob("*/response.txt"))) == 1
 
 
@@ -192,14 +197,14 @@ def test_async_cancellation_reaches_provider(root):
 
 
 def test_provider_selection_is_explicit_and_unsupported_async_fails(root):
-    with pytest.raises(slick.PromptError, match=r"model.*provider|provider.*model"):
+    with pytest.raises(TypeError, match="model"):
         slick.prompt(model=FakeProvider(), provider=FakeProvider())(lambda: None)
 
     @slick.prompt(provider=FakeProvider())
     def answer(question: str) -> str:
         """{{ question }}"""
 
-    with pytest.raises(slick.PromptError, match="model"):
+    with pytest.raises(TypeError, match="model"):
         answer("x", model=FakeProvider())
 
     class SyncOnly:
@@ -210,7 +215,7 @@ def test_provider_selection_is_explicit_and_unsupported_async_fails(root):
     async def async_answer(question: str) -> str:
         """{{ question }}"""
 
-    with pytest.raises(slick.PromptError, match="acall"):
+    with pytest.raises(AttributeError, match="acall"):
         asyncio.run(async_answer("x"))
 
 
@@ -229,18 +234,18 @@ def test_custom_provider_needs_no_identity_unless_persistence_is_enabled(root):
     def cached(value: str) -> str:
         """{{ value }}"""
 
-    with pytest.raises(slick.PromptError, match="identity"):
+    with pytest.raises(AttributeError, match="identity"):
         cached("hello")
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_explicit_repairs_do_not_require_disk_persistence(root, asynchronous):
-    class Repairing(FakeProvider):
+def test_caller_owns_retries_after_parse_failure(root, asynchronous):
+    class Scripted(FakeProvider):
         def call(self, text):
             self.calls.append(text)
             return ("bad" if len(self.calls) == 1 else "[1,2]", [])
 
-    provider = Repairing()
+    provider = Scripted()
 
     def declaration() -> list[int]:
         """Numbers"""
@@ -248,16 +253,17 @@ def test_explicit_repairs_do_not_require_disk_persistence(root, asynchronous):
     async def async_declaration() -> list[int]:
         """Numbers"""
 
-    fn = slick.prompt(provider=provider, max_repairs=1)(
-        async_declaration if asynchronous else declaration
-    )
+    fn = slick.prompt(provider=provider)(async_declaration if asynchronous else declaration)
+    with pytest.raises(ValidationError):
+        asyncio.run(fn()) if asynchronous else fn()
+    assert len(provider.calls) == 1
     assert (asyncio.run(fn()) if asynchronous else fn()) == [1, 2]
     assert len(provider.calls) == 2
-    assert "# Repair" in provider.calls[1]
+    assert provider.calls[0] == provider.calls[1]
     assert not (root / "logs").exists()
 
 
-def test_output_save_remains_explicit_on_modern_path(root):
+def test_output_save_remains_explicit(root):
     @slick.prompt(provider=FakeProvider("answer"))
     def answer() -> str:
         """Answer"""

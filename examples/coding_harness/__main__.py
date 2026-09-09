@@ -8,8 +8,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from slick import prompts
-from slick.providers import AnthropicAPI, LiteLLMAPI, OpenAIAPI
+from slick import prompts, providers
 
 from .agent import CodingAgent
 from .demo import DemoProvider, create_demo
@@ -136,15 +135,15 @@ def main(argv=None):
                 if saved
                 else (create_demo(root) if provider == "demo" else load_config(args.config))
             )
-            provider_instance = (
-                DemoProvider(root)
-                if provider == "demo"
-                else {
-                    "openai": OpenAIAPI,
-                    "anthropic": AnthropicAPI,
-                    "litellm": LiteLLMAPI,
-                }[provider](model=model)
-            )
+            if provider == "demo":
+                provider_instance = DemoProvider(root)
+            else:
+                provider_name = {
+                    "openai": "OpenAIAPI",
+                    "anthropic": "AnthropicAPI",
+                    "litellm": "LiteLLMAPI",
+                }[provider]
+                provider_instance = getattr(providers, provider_name)(model=model)
             if args.headless:
                 return asyncio.run(_headless(provider_instance, root, config, args.task, saved))
             try:

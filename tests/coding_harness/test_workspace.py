@@ -10,7 +10,7 @@ import pytest
 
 from examples.coding_harness.state import Check
 from examples.coding_harness.workspace import Workspace
-from slick import Tool, ToolError
+from slick import ToolError, tool
 from slick.tools import prepare_tools
 
 
@@ -30,7 +30,7 @@ def test_all_methods_prepare(workspace):
 def test_slice_digest_unicode_and_newlines(workspace):
     path = workspace.root / "unicode.txt"
     path.write_bytes("café\r\nsecond\r\n".encode())
-    result = json.loads(Tool(workspace.read_file).invoke({"path": "unicode.txt", "max_lines": 1}))
+    result = json.loads(tool(workspace.read_file).invoke({"path": "unicode.txt", "max_lines": 1}))
     assert result["text"] == "café\r\n"
     assert result["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert result["truncated"]
@@ -41,7 +41,7 @@ def test_stale_edit_does_not_overwrite_external_changes(workspace):
     original = workspace.read_file("sample.py")
     target.write_text("value = 2\n")
     with pytest.raises(ToolError):
-        Tool(workspace.edit_file).invoke(
+        tool(workspace.edit_file).invoke(
             {
                 "path": "sample.py",
                 "old": "value = 1",
@@ -69,9 +69,9 @@ def test_edit_preserves_bytes_and_permissions(workspace):
 @pytest.mark.parametrize("path", ["../escape", "/tmp/escape", ".git/config", "dir/../sample.py"])
 def test_disallowed_paths(workspace, path):
     with pytest.raises(ToolError):
-        Tool(workspace.read_file).invoke({"path": path})
+        tool(workspace.read_file).invoke({"path": path})
     with pytest.raises(ToolError):
-        Tool(workspace.create_file).invoke({"path": path, "content": "bad"})
+        tool(workspace.create_file).invoke({"path": path, "content": "bad"})
 
 
 def test_symlinks_and_nonregular_files(workspace):
@@ -105,7 +105,7 @@ def test_ambiguous_and_empty_replacement(workspace):
 
 def test_exclusive_create_and_existing_parent(workspace):
     result = json.loads(
-        Tool(workspace.create_file).invoke({"path": "new.py", "content": "hello\n"})
+        tool(workspace.create_file).invoke({"path": "new.py", "content": "hello\n"})
     )
     assert result["path"] == "new.py"
     for name in ["new.py", "missing/new.py"]:

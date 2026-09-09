@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shlex
 import signal
 import sys
 import tempfile
@@ -16,11 +17,7 @@ from slick.providers import (
     CodexCLI,
     Command,
     ProviderError,
-    get_command,
-    get_default,
-    set_default,
 )
-from slick.providers import _command as command_module
 
 
 class FakeCommand(Command):
@@ -33,19 +30,27 @@ class FakeCommand(Command):
         self.transcript = transcript
         self.runs: list[tuple] = []
 
-    def _command(self, *, workdir, sandbox):
+    def _command(self, *, sandbox):
         return ["fake-cli", sandbox]
 
-    def _run_process(self, command, prompt, *, workdir, label):
-        self.runs.append((command, prompt, workdir, label))
+    def _run_process(self, command, prompt, *, workdir):
+        self.runs.append((command, prompt, workdir))
         return self.transcript
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_base_runs_an_ordinary_command_without_provider_flags(asynchronous):
+    argv = [sys.executable, "-c", "import sys; print(sys.argv[1:], end='')", "plain argument"]
+    command = Command(shlex.join(argv), model="metadata-only")
+    result = asyncio.run(command.acall("input")) if asynchronous else command.call("input")
+    assert result == ("['plain argument']", [])
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_calls_use_configured_workdir_and_execute_can_override(asynchronous):
     class AsyncFake(FakeCommand):
-        async def _arun_process(self, command, prompt, *, workdir, label):
-            return self._run_process(command, prompt, workdir=workdir, label=label)
+        async def _arun_process(self, command, prompt, *, workdir):
+            return self._run_process(command, prompt, workdir=workdir)
 
     model = AsyncFake(workdir="/tmp/configured")
 
@@ -79,15 +84,15 @@ def test_configured_directory_reaches_the_child_process(tmp_path, asynchronous):
 def test_codex_relative_workdir_is_not_applied_twice(tmp_path, monkeypatch, asynchronous):
     workdir = tmp_path / "subdir"
     workdir.mkdir()
-    script = tmp_path / "codex.py"
+    script = tmp_path / "codex wrapper.py"
     script.write_text(
         "import json, os, sys\n"
-        "os.chdir(sys.argv[sys.argv.index('--cd') + 1])\n"
+        "if '--cd' in sys.argv: os.chdir(sys.argv[sys.argv.index('--cd') + 1])\n"
         "print(json.dumps({'type': 'item.completed', 'item': "
         "{'type': 'agent_message', 'text': os.getcwd()}}))\n"
     )
     monkeypatch.chdir(tmp_path)
-    model = CodexCLI(command=str(script), workdir="subdir")
+    model = CodexCLI(command=shlex.join([sys.executable, str(script)]), workdir="subdir")
     result = asyncio.run(model.acall("prompt")) if asynchronous else model.call("prompt")
     assert Path(result[0]) == workdir.resolve()
 
@@ -109,13 +114,10 @@ class Call(unittest.TestCase):
     def test_the_prompt_is_fed_to_the_process(self):
         model = FakeCommand()
         model.call("analyze this")
-        (_, prompt, _, label) = model.runs[0]
+        (_, prompt, _) = model.runs[0]
         self.assertEqual(prompt, "analyze this")
-        self.assertEqual(label, "fake")
 
     def test_an_empty_response_is_returned_as_is(self):
-        # Deciding what an empty response means is the caller's job; @prompt
-        # refuses to save one, but Command just reports what it got.
         self.assertEqual(FakeCommand(transcript="").call("analyze this"), ("", []))
 
 
@@ -129,7 +131,7 @@ class Subprocess(unittest.TestCase):
             super().__init__("python", **kwargs)
             self.argv = argv
 
-        def _command(self, *, workdir, sandbox):
+        def _command(self, *, sandbox):
             return self.argv
 
     def test_stdout_is_captured_and_stdin_is_the_prompt(self):
@@ -191,7 +193,7 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
         model = Subprocess.RealCommand([sys.executable, "-c", "import sys; sys.stdin.read()"])
         try:
             with patch(
-                "slick.providers._command.asyncio.create_subprocess_exec",
+                "slick.providers.cli_tool.asyncio.create_subprocess_exec",
                 side_effect=record_process,
             ):
                 with self.assertRaises(UnicodeEncodeError):
@@ -211,8 +213,8 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
 
     async def test_execute_preserves_workdir_and_sandbox(self):
         class AsyncFake(FakeCommand):
-            async def _arun_process(self, command, prompt, *, workdir, label):
-                return self._run_process(command, prompt, workdir=workdir, label=label)
+            async def _arun_process(self, command, prompt, *, workdir):
+                return self._run_process(command, prompt, workdir=workdir)
 
         model = AsyncFake()
         result = await model.aexecute("prompt", workdir="/tmp/work", sandbox="workspace-write")
@@ -220,7 +222,7 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.transcript, "report body")
         self.assertEqual(
             model.runs,
-            [(["fake-cli", "workspace-write"], "prompt", Path("/tmp/work"), "fake")],
+            [(["fake-cli", "workspace-write"], "prompt", Path("/tmp/work"))],
         )
         await model.aexecute("prompt", workdir="")
         self.assertEqual(model.runs[-1][2], Path("."))
@@ -284,7 +286,9 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / "fake_codex.py"
             script.write_text(f"import sys\nsys.stdin.read()\nsys.stdout.write({transcript!r})\n")
-            result = await CodexCLI(command=str(script)).aexecute("prompt")
+            result = await CodexCLI(command=shlex.join([sys.executable, str(script)])).aexecute(
+                "prompt"
+            )
         self.assertEqual(result.final_message, "final")
         self.assertEqual(result.transcript, transcript)
 
@@ -323,72 +327,21 @@ class AsyncSubprocess(unittest.IsolatedAsyncioTestCase):
 
 
 class Commands(unittest.TestCase):
-    def test_codex_passes_workdir_sandbox_and_model(self):
-        command = CodexCLI(model="gpt-5")._command(workdir=Path("/tmp/work"), sandbox="read-only")
+    def test_codex_passes_sandbox_and_model(self):
+        command = CodexCLI(model="gpt-5")._command(sandbox="read-only")
         self.assertIn("--json", command)
         self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
-        self.assertEqual(command[command.index("--cd") + 1], "/tmp/work")
         self.assertEqual(command[command.index("--model") + 1], "gpt-5")
         self.assertEqual(command[-1], "-")
 
     def test_codex_omits_workdir_and_model_when_unset(self):
-        command = CodexCLI()._command(workdir=None, sandbox="read-only")
+        command = CodexCLI()._command(sandbox="read-only")
         self.assertNotIn("--cd", command)
         self.assertNotIn("--model", command)
 
     def test_claude_appends_the_model(self):
-        command = ClaudeCLI(model="claude-opus-4-8")._command(workdir=None, sandbox="read-only")
+        command = ClaudeCLI(model="claude-opus-4-8")._command(sandbox="read-only")
         self.assertEqual(command[command.index("--model") + 1], "claude-opus-4-8")
-
-    def test_get_command_selects_the_provider(self):
-        self.assertIsInstance(get_command("codex"), CodexCLI)
-        self.assertIsInstance(get_command("claude"), ClaudeCLI)
-        with self.assertRaises(KeyError):
-            get_command("nope")
-
-
-class Defaults(unittest.TestCase):
-    """Resolution order: argument, then set_default, then env, then built-in."""
-
-    def setUp(self) -> None:
-        for name in ("_default_provider", "_default_model"):
-            self.addCleanup(setattr, command_module, name, getattr(command_module, name))
-            setattr(command_module, name, None)
-        for name in ("SLICK_PROVIDER", "SLICK_MODEL"):
-            self.addCleanup(os.environ.pop, name, None)
-            os.environ.pop(name, None)
-
-    def test_the_built_in_default_applies_when_nothing_is_set(self):
-        self.assertEqual(get_default(), ("codex", None))
-        self.assertIsInstance(get_command(), CodexCLI)
-
-    def test_set_default_is_used_by_a_bare_get_command(self):
-        set_default(provider="claude", model="claude-opus-4-8")
-        self.assertEqual(get_default(), ("claude", "claude-opus-4-8"))
-        model = get_command()
-        self.assertIsInstance(model, ClaudeCLI)
-        self.assertEqual(model.model, "claude-opus-4-8")
-
-    def test_the_environment_applies_when_nothing_was_set_in_process(self):
-        os.environ["SLICK_PROVIDER"] = "claude"
-        os.environ["SLICK_MODEL"] = "claude-haiku-4-5"
-        self.assertEqual(get_default(), ("claude", "claude-haiku-4-5"))
-
-    def test_set_default_beats_the_environment(self):
-        os.environ["SLICK_PROVIDER"] = "claude"
-        set_default(provider="codex")
-        self.assertEqual(get_default()[0], "codex")
-
-    def test_an_argument_beats_everything(self):
-        os.environ["SLICK_PROVIDER"] = "claude"
-        set_default(provider="claude", model="claude-opus-4-8")
-        model = get_command("codex", "gpt-5")
-        self.assertIsInstance(model, CodexCLI)
-        self.assertEqual(model.model, "gpt-5")
-
-    def test_an_unknown_default_provider_is_rejected_where_it_is_set(self):
-        with self.assertRaises(KeyError):
-            set_default(provider="nope")
 
 
 if __name__ == "__main__":

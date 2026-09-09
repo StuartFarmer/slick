@@ -14,12 +14,9 @@ from .providers import (
     ExecutionResult,
     Provider,
     ProviderError,
-    get_command,
-    get_default,
-    set_default,
 )
 from .session import Session
-from .tools import Tool, ToolError, ToolRequest, ToolResult
+from .tools import Tool, ToolError, ToolRequest, ToolResult, tool
 
 try:
     __version__ = version("slick-ai")
@@ -38,10 +35,8 @@ __all__ = [
     "ToolRequest",
     "ToolResult",
     "__version__",
-    "get_command",
-    "get_default",
     "parse",
     "prompt",
     "render",
-    "set_default",
+    "tool",
 ]

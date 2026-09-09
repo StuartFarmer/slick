@@ -37,6 +37,7 @@ build-backend = "poetry.core.masonry.api"
 minversion = "7.0"
 addopts = "-q"
 testpaths = ["tests"]
+pythonpath = ["tests"]
 
 [tool.ruff]
 line-length = 100

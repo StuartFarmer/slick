@@ -211,7 +211,7 @@ workspace has been removed. Nothing is saved automatically.
 
 Add a normal annotated, documented method to `Workspace` and pass its bound method
 in `CodingAgent`'s `Session(..., tools=[...])` list. The method keeps access to instance state;
-Slick derives its schema and validates arguments/results. No decorator is needed.
+Slick derives its schema, passes arguments through, and serializes results. No decorator is needed.
 Edit the Jinja files to change instructions. Add a skill template to the explicit
 `SKILLS` mapping to make it selectable. Retrieval, memory, extra application methods
 and alternate verification are ordinary Python changes here.

@@ -7,7 +7,6 @@ from pathlib import Path
 
 from slick import Prompt, Session, parse
 from slick.providers import ProviderError
-from slick.tools._protocol import validate_response
 
 from .context import (
     context_size,
@@ -254,7 +253,7 @@ class CodingAgent:
         self.state.edit_ledger = list(self.workspace.edit_ledger)
         text = summary_prompt(self.state, self.config, self.session)
         self._request_budget()
-        text, requests = validate_response(await self.provider.acall(text, tools=[]))
+        text, requests = await self.provider.acall(text, tools=[])
         if requests:
             raise ValueError("Summary must not request tools")
         summary = parse(text, ContextSummary)

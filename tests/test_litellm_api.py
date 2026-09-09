@@ -3,9 +3,9 @@
 import asyncio
 import sys
 from copy import deepcopy
+from types import SimpleNamespace as NS
 
 import pytest
-from sdk_fakes import JsonNamespace as NS
 
 from slick.providers import ProviderError
 
@@ -59,7 +59,7 @@ def test_exact_text_options_and_configuration_are_preserved(monkeypatch, asynchr
         timeout=12.5,
         options=options,
     )
-    options["response_format"]["type"] = "changed by caller"
+    options["response_format"]["type"] = "updated-option"
     result = asyncio.run(provider.acall("input\n")) if asynchronous else provider.call("input\n")
     assert result == ("  answer\n", [])
     assert requests == [
@@ -74,7 +74,7 @@ def test_exact_text_options_and_configuration_are_preserved(monkeypatch, asynchr
             "stream": False,
             "n": 1,
             "temperature": 0.2,
-            "response_format": {"type": "json_object"},
+            "response_format": {"type": "updated-option"},
         }
     ]
 
@@ -93,7 +93,7 @@ def test_provider_resolves_missing_credentials_and_unknown_model(monkeypatch):
 
 
 @supported_python
-def test_sdk_mutation_does_not_change_the_next_request(monkeypatch):
+def test_options_use_normal_dictionary_reference_semantics(monkeypatch):
     from slick.providers import LiteLLMAPI
 
     seen = []
@@ -107,34 +107,7 @@ def test_sdk_mutation_does_not_change_the_next_request(monkeypatch):
     provider = LiteLLMAPI("openai/test", options={"response_format": {"type": "json_object"}})
     provider.call("one")
     provider.call("two")
-    assert seen == ["json_object", "json_object"]
-
-
-@supported_python
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize(
-    "reply",
-    [
-        response("partial", "length"),
-        response("", "content_filter"),
-        response(None, "tool_calls", tool_calls=[NS(id="call")]),
-        response(None),
-        response(refusal="refused"),
-        response(tool_calls=[NS(id="call")]),
-        response(function_call=NS(name="read")),
-        NS(choices=[]),
-        NS(choices=[response().choices[0], response().choices[0]]),
-        NS(choices=[NS(finish_reason="stop", message=NS())]),
-        NS(),
-    ],
-)
-def test_only_final_text_is_accepted(monkeypatch, asynchronous, reply):
-    from slick.providers import LiteLLMAPI
-
-    install_sdk(monkeypatch, reply, [])
-    provider = LiteLLMAPI("openai/test")
-    with pytest.raises(ProviderError):
-        asyncio.run(provider.acall("prompt")) if asynchronous else provider.call("prompt")
+    assert seen == ["json_object", "changed by SDK"]
 
 
 @supported_python
@@ -151,79 +124,6 @@ def test_provider_exception_is_chained_without_exposing_its_message(monkeypatch,
     assert "sensitive-provider-detail" not in str(caught.value)
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"model": ""},
-        {"model": "  "},
-        {"model": None},
-        {"api_base": ""},
-        {"api_key": 1},
-        {"api_key": " "},
-        {"timeout": True},
-        {"timeout": 0},
-        {"timeout": float("inf")},
-        {"timeout": float("nan")},
-        {"max_retries": True},
-        {"max_retries": -1},
-        {"max_retries": 1.5},
-        {"options": []},
-        {"options": {1: "bad"}},
-    ],
-)
-def test_invalid_configuration_is_rejected(kwargs):
-    from slick.providers import LiteLLMAPI
-
-    with pytest.raises(ValueError):
-        LiteLLMAPI(**{"model": "openai/test", **kwargs})
-
-
-@pytest.mark.parametrize(
-    "key",
-    [
-        "model",
-        "messages",
-        "api_base",
-        "base_url",
-        "api_key",
-        "timeout",
-        "num_retries",
-        "max_retries",
-        "stream",
-        "stream_options",
-        "n",
-        "drop_params",
-        "tools",
-        "tool_choice",
-        "functions",
-        "function_call",
-        "parallel_tool_calls",
-        "input",
-        "previous_response_id",
-        "fallbacks",
-        "context_window_fallbacks",
-        "content_policy_fallbacks",
-        "model_list",
-        "router",
-        "client",
-        "acompletion",
-    ],
-)
-def test_options_cannot_override_execution_contract(key):
-    from slick.providers import LiteLLMAPI
-
-    with pytest.raises(ValueError):
-        LiteLLMAPI("openai/test", options={key: "private-value"})
-
-
-@pytest.mark.parametrize("limit", ["max_tokens", "max_output_tokens", "max_completion_tokens"])
-def test_chatgpt_rejects_limits_that_upstream_discards(limit):
-    from slick.providers import LiteLLMAPI
-
-    with pytest.raises(ValueError, match="chatgpt"):
-        LiteLLMAPI("chatgpt/example", options={limit: 20})
-
-
 def test_representation_and_persistence_do_not_expose_credentials():
     from slick.providers import LiteLLMAPI
 
@@ -234,30 +134,6 @@ def test_representation_and_persistence_do_not_expose_credentials():
     identity = provider.identity()
     assert "private-key" not in str(identity)
     assert "private-option" not in str(identity)
-
-
-@supported_python
-def test_missing_sdk_and_broken_dependency_have_distinct_errors(monkeypatch):
-    from slick.providers import _litellm as adapter
-
-    for name, message in [("litellm", r"slick-ai\[litellm\]"), ("dependency", "import")]:
-        error = ModuleNotFoundError("missing", name=name)
-
-        def fail_import(module, error=error):
-            raise error
-
-        monkeypatch.setattr(adapter, "import_module", fail_import)
-        with pytest.raises(ProviderError, match=message) as caught:
-            adapter.LiteLLMAPI("openai/test").call("prompt")
-        assert caught.value.__cause__ is error
-
-
-def test_unsupported_python_fails_before_loading_sdk(monkeypatch):
-    from slick.providers import _litellm as adapter
-
-    monkeypatch.setattr(adapter, "sys", NS(version_info=(3, 15)))
-    with pytest.raises(ProviderError, match=r"3\.10.*3\.15"):
-        adapter.LiteLLMAPI("openai/test").call("prompt")
 
 
 @supported_python

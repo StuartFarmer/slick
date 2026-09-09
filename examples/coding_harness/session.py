@@ -1,52 +1,59 @@
 """Explicit JSON snapshots of inert session data; never replay saved actions."""
 
+import json
 import os
 import tempfile
 from copy import deepcopy
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import AfterValidator, ConfigDict, Field, TypeAdapter, model_validator
+from typing_extensions import NotRequired, TypedDict
 
 from slick import Session
-from slick.tools._protocol import (
-    decode_arguments,
-    make_request,
-    validate_requests,
-    validate_response,
-    validate_results,
-)
+from slick.session import SessionSnapshot
+from slick.tools import ToolRequest, ToolResult, make_request
 
 from .agent import CodingAgent
 from .state import HarnessConfig, Record, RunResult, SessionState, Verification
 from .workspace import Workspace
 
 MAX_SESSION_BYTES = 20 * 1024 * 1024
+SNAPSHOT_CONFIG = ConfigDict(strict=True, extra="forbid", hide_input_in_errors=True)
+
+
+class _UserRecord(TypedDict):
+    __pydantic_config__ = SNAPSHOT_CONFIG
+    kind: Literal["user"]
+    text: str
+
+
+class _ModelRecord(TypedDict):
+    __pydantic_config__ = SNAPSHOT_CONFIG
+    kind: Literal["model"]
+    text: str
+    tool_requests: list[ToolRequest]
+
+
+class _ResultRecord(ToolResult):
+    __pydantic_config__ = SNAPSHOT_CONFIG
+    kind: Literal["result"]
+
+
+_history = TypeAdapter(
+    list[
+        Annotated[
+            _UserRecord | _ModelRecord | _ResultRecord,
+            Field(discriminator="kind"),
+        ]
+    ],
+    config=SNAPSHOT_CONFIG,
+)
 
 
 def decode_history(records):
     """Validate application transcript records without imposing an API replay order."""
-    if not isinstance(records, list):
-        raise ValueError("History must be a list")
-    normalized = []
-    for record in records:
-        if not isinstance(record, dict):
-            raise ValueError("History records must be dictionaries")
-        data = dict(record)
-        kind = data.pop("kind", None)
-        if kind == "user":
-            if data.keys() != {"text"} or not isinstance(data["text"], str):
-                raise ValueError("User record requires string text")
-        elif kind == "model":
-            if data.keys() != {"text", "tool_requests"}:
-                raise ValueError("Model record requires text and tool_requests")
-            validate_response((data["text"], data["tool_requests"]))
-        elif kind == "result":
-            data = validate_results([data])[0]
-        else:
-            raise ValueError(f"Unknown history tag: {kind!r}")
-        normalized.append({"kind": kind, **deepcopy(data)})
-    return normalized
+    return _history.dump_python(_history.validate_python(records), exclude_unset=True)
 
 
 def _legacy_request(call, items):
@@ -108,9 +115,7 @@ def _migrate_history(records):
                 or not isinstance(record["tool_calls"], list)
             ):
                 raise ValueError("Invalid legacy model record")
-            calls = validate_requests(
-                [_legacy_request(call, record["items"]) for call in record["tool_calls"]]
-            )
+            calls = [_legacy_request(call, record["items"]) for call in record["tool_calls"]]
             pending = {call["id"]: call for call in calls}
             converted.append({"kind": "model", "text": record["text"], "tool_requests": calls})
         elif kind == "result":
@@ -172,27 +177,24 @@ def _legacy_views(history: list, pending_results=()) -> list[dict]:
     return views
 
 
-class ContextView(Record):
+class ContextView(TypedDict):
+    __pydantic_config__ = SNAPSHOT_CONFIG
     role: Literal["user", "assistant", "tool"]
     text: str
-    calls: list[dict] = Field(default_factory=list)
-    id: str | None = None
-    error: bool = Field(default=False, strict=True)
-
-    @model_validator(mode="after")
-    def valid_calls(self):
-        validate_requests(self.calls)
-        if self.role == "tool" and (not self.id or not self.id.strip()):
-            raise ValueError("Tool context requires an ID")
-        return self
+    calls: NotRequired[list[ToolRequest]]
+    id: NotRequired[str | None]
+    error: NotRequired[bool]
 
 
 class ContextNote(ContextView):
-    after: int = Field(strict=True, ge=0)
+    __pydantic_config__ = SNAPSHOT_CONFIG
+    after: Annotated[int, Field(strict=True, ge=0)]
 
 
-def _context_views(records, cls=ContextView):
-    return [cls.model_validate(record).model_dump(exclude_unset=True) for record in records]
+def _valid_tool_id(view):
+    if view["role"] == "tool" and (not view.get("id") or not view["id"].strip()):
+        raise ValueError("Tool context requires an ID")
+    return view
 
 
 class SavedEdit(Record):
@@ -210,10 +212,10 @@ class SavedSession(Record):
     head: str | None
     fingerprint: str
     config: HarnessConfig
-    session: dict
-    context_notes: list[dict]
+    session: SessionSnapshot
+    context_notes: list[Annotated[ContextNote, AfterValidator(_valid_tool_id)]]
     context_start: int = Field(strict=True, ge=0)
-    archived_histories: list[list[dict]]
+    archived_histories: list[list[Annotated[ContextView, AfterValidator(_valid_tool_id)]]]
     task: str
     turns: int = Field(strict=True, ge=0)
     tool_calls: int = Field(strict=True, ge=0)
@@ -239,7 +241,7 @@ class SavedSession(Record):
             ]
             data["pending_results"] = []
         history = decode_history(data.pop("history", []))
-        results = validate_results(data.pop("pending_results", []))
+        results = data.pop("pending_results", [])
         data["context_notes"] = [{"after": 0, **view} for view in _legacy_views(history, results)]
         data["context_start"] = 0
         data["archived_histories"] = [
@@ -258,14 +260,11 @@ class SavedSession(Record):
 
     @model_validator(mode="after")
     def valid_history(self):
-        self.session = Session.from_dict(self.session).to_dict()
         length = len(self.session["history"])
-        self.context_notes = _context_views(self.context_notes, ContextNote)
         if self.context_start > length or any(
             note["after"] > length for note in self.context_notes
         ):
             raise ValueError("Context position exceeds Session history")
-        self.archived_histories = [_context_views(history) for history in self.archived_histories]
         return self
 
 
@@ -299,7 +298,7 @@ def save_session(path: Path, agent: CodingAgent) -> None:
         last_result=state.last_result,
         baseline=state.baseline,
     )
-    payload = snapshot.model_dump_json(indent=2).encode("utf-8")
+    payload = snapshot.model_dump_json(indent=2, exclude_unset=True).encode("utf-8")
     if len(payload) > MAX_SESSION_BYTES:
         raise ValueError("Session exceeds the 20 MiB save limit")
     temporary = None
@@ -322,13 +321,11 @@ def load_session(path: Path) -> SavedSession:
         payload = handle.read(MAX_SESSION_BYTES + 1)
     if len(payload) > MAX_SESSION_BYTES:
         raise ValueError("Session exceeds the 20 MiB load limit")
-    parsed, error = decode_arguments(payload.decode("utf-8"))
-    if error:
-        raise ValueError(error)
-    return SavedSession.model_validate(parsed)
+    return SavedSession.model_validate(json.loads(payload))
 
 
 async def restore_session(saved: SavedSession, provider, *, decide, emit) -> CodingAgent:
+    data = saved.model_dump(exclude_unset=True)
     identity = provider.identity()
     root = Path(saved.root)
     if not root.is_absolute() or root.resolve() != root:
@@ -350,9 +347,9 @@ async def restore_session(saved: SavedSession, provider, *, decide, emit) -> Cod
         root=saved.root,
         head=workspace.head,
         fingerprint=fingerprint,
-        context_notes=deepcopy(saved.context_notes),
+        context_notes=data["context_notes"],
         context_start=saved.context_start,
-        archived_histories=deepcopy(saved.archived_histories),
+        archived_histories=data["archived_histories"],
         task=saved.task,
         turns=saved.turns,
         tool_calls=saved.tool_calls,

@@ -1,8 +1,25 @@
 """Canonical provider classes share one execution contract."""
 
-import inspect
 import subprocess
 import sys
+from dataclasses import is_dataclass
+from inspect import signature
+
+
+def test_providers_use_handwritten_constructors_without_client_injection():
+    from slick.providers import (
+        AnthropicAPI,
+        Command,
+        ExecutionResult,
+        LiteLLMAPI,
+        OpenAIAPI,
+        OpenRouterAPI,
+    )
+
+    for cls in (AnthropicAPI, Command, ExecutionResult, LiteLLMAPI, OpenAIAPI, OpenRouterAPI):
+        assert not is_dataclass(cls)
+        assert "client" not in signature(cls).parameters
+        assert "async_client" not in signature(cls).parameters
 
 
 def test_provider_names_and_ownership():
@@ -11,8 +28,6 @@ def test_provider_names_and_ownership():
 
     assert slick.Provider is providers.Provider
     assert slick.ProviderError is providers.ProviderError
-    assert inspect.isabstract(providers.Provider)
-    assert inspect.isabstract(providers.Command)
     for name in (
         "CodexCLI",
         "ClaudeCLI",
@@ -25,28 +40,9 @@ def test_provider_names_and_ownership():
         assert cls.__name__ == name
         assert cls.__module__.startswith("slick.providers.")
         assert issubclass(cls, providers.Provider)
-    assert slick.get_command is providers.get_command
 
 
-def test_public_defaults_share_state(monkeypatch):
-    import slick
-    from slick import providers
-    from slick.providers import _command
-
-    monkeypatch.setattr(_command, "_default_provider", None)
-    monkeypatch.setattr(_command, "_default_model", None)
-    monkeypatch.delenv("SLICK_PROVIDER", raising=False)
-    monkeypatch.delenv("SLICK_MODEL", raising=False)
-    slick.set_default(provider="claude", model="selected")
-    provider = providers.get_command()
-    assert isinstance(provider, providers.ClaudeCLI)
-    assert provider.model == "selected"
-    providers.set_default(provider="codex")
-    assert slick.get_default() == ("codex", "selected")
-    assert isinstance(slick.get_command(), providers.CodexCLI)
-
-
-def test_imports_and_construction_do_not_load_sdks_or_start_io():
+def test_base_import_and_cli_do_not_load_optional_sdks_or_start_io():
     code = """
 import sys
 
@@ -58,15 +54,36 @@ def forbid(event, args):
 
 sys.addaudithook(forbid)
 import slick
-from slick.providers import (
-    Provider, Command, CodexCLI, ClaudeCLI, OpenAIAPI, AnthropicAPI, LiteLLMAPI, OpenRouterAPI,
-)
-for provider in (
-    CodexCLI(), ClaudeCLI(), OpenAIAPI('test'), AnthropicAPI('test'), LiteLLMAPI('test'),
-    OpenRouterAPI('vendor/model'),
-):
+from slick import cli
+from examples import _cli
+from examples.coding_harness import __main__
+from slick.providers import Provider, CodexCLI, ClaudeCLI
+for provider in (CodexCLI(), ClaudeCLI()):
     assert isinstance(provider, Provider)
+assert cli.build_parser().parse_args(['call', '--provider', 'codex']).provider == 'codex'
 assert not {'openai', 'anthropic', 'litellm'} & sys.modules.keys()
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_optional_sdks_load_only_when_a_request_is_sent():
+    code = """
+import sys
+sys.modules['openai'] = None
+sys.modules['anthropic'] = None
+sys.modules['litellm'] = None
+import slick
+from slick import providers
+for name in ('OpenAIAPI', 'OpenRouterAPI', 'AnthropicAPI', 'LiteLLMAPI'):
+    try:
+        options = {"api_key": "offline"} if name == "OpenRouterAPI" else {}
+        getattr(providers, name)("model", **options).call("input")
+    except providers.ProviderError as exc:
+        assert isinstance(exc.__cause__, ModuleNotFoundError)
+    else:
+        raise AssertionError(name)
+assert providers.CodexCLI().provider == 'codex'
 """
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

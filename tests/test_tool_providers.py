@@ -1,14 +1,18 @@
 """Exact native formats for stateless, application-built tool exchanges."""
 
-import importlib
 import json
 from copy import deepcopy
 
 import pytest
+from sdk_fakes import sdk_response
 
 
-def codec(name):
-    return importlib.import_module(f"slick.providers._tools._{name}")
+def provider(name):
+    from slick.providers import AnthropicAPI, OpenAIAPI, OpenRouterAPI
+
+    return {"openai": OpenAIAPI, "anthropic": AnthropicAPI, "chat_completions": OpenRouterAPI}[
+        name
+    ]("model")
 
 
 def read(path: str) -> str:
@@ -65,7 +69,7 @@ def reply(name, *, calls=True, text="  answer\n", arguments=None):
 def test_decode_preserves_text_and_requests(name, text, calls):
     original = reply(name, calls=calls, text=text)
     saved = deepcopy(original)
-    assert codec(name).decode_response(original) == (text, [request()] if calls else [])
+    assert provider(name)._decode(sdk_response(original)) == (text, [request()] if calls else [])
     assert original == saved
 
 
@@ -73,9 +77,12 @@ def test_decode_preserves_text_and_requests(name, text, calls):
 def test_encode_self_contained_results(name):
     results = [{"request": request(), "content": "contents", "is_error": False}]
     saved = deepcopy(results)
-    encoded = codec(name).encode_request("new summary", {}, results)
+    encoded = provider(name)._encode("new summary", {}, results)
     if name == "openai":
         assert encoded == {
+            "model": "model",
+            "max_output_tokens": 2048,
+            "store": False,
             "input": [
                 {"role": "user", "content": "new summary"},
                 {
@@ -85,10 +92,12 @@ def test_encode_self_contained_results(name):
                     "arguments": '{"path": "a.py"}',
                 },
                 {"type": "function_call_output", "call_id": "a", "output": "contents"},
-            ]
+            ],
         }
     elif name == "anthropic":
         assert encoded == {
+            "model": "model",
+            "max_tokens": 2048,
             "messages": [
                 {"role": "user", "content": "new summary"},
                 {
@@ -108,10 +117,14 @@ def test_encode_self_contained_results(name):
                         },
                     ],
                 },
-            ]
+            ],
         }
     else:
         assert encoded == {
+            "model": "model",
+            "max_tokens": 2048,
+            "stream": False,
+            "n": 1,
             "messages": [
                 {"role": "user", "content": "new summary"},
                 {
@@ -125,7 +138,7 @@ def test_encode_self_contained_results(name):
                     ],
                 },
                 {"role": "tool", "tool_call_id": "a", "content": "contents"},
-            ]
+            ],
         }
     assert results == saved
 
@@ -135,7 +148,7 @@ def test_definitions_are_owned_and_empty_context_does_not_invent_text(name):
     from slick.tools import prepare_tools
 
     prepared = prepare_tools([read])
-    encoded = codec(name).encode_request(
+    encoded = provider(name)._encode(
         "",
         prepared,
         [
@@ -145,7 +158,7 @@ def test_definitions_are_owned_and_empty_context_does_not_invent_text(name):
     )
     assert encoded["tools"]
     assert "user" not in json.dumps(encoded.get("input", [])[:1])
-    definitions = codec(name).tool_definitions(prepared)
+    definitions = encoded["tools"]
     schema = definitions[0].get("function", definitions[0])
     schema = schema.get("input_schema", schema.get("parameters"))
     schema["required"].clear()
@@ -153,12 +166,12 @@ def test_definitions_are_owned_and_empty_context_does_not_invent_text(name):
 
 
 @pytest.mark.parametrize("name", ["openai", "chat_completions"])
-@pytest.mark.parametrize("raw", ["bad", "[]", '{"x":NaN}', '{"x":1,"x":2}'])
+@pytest.mark.parametrize("raw", ["bad", "{"])
 def test_malformed_json_can_be_returned_as_an_error(name, raw):
-    text, requests = codec(name).decode_response(reply(name, arguments=raw))
+    text, requests = provider(name)._decode(sdk_response(reply(name, arguments=raw)))
     assert requests[0]["arguments"] == raw
     assert requests[0]["argument_error"]
-    encoded = codec(name).encode_request(
+    encoded = provider(name)._encode(
         "continue",
         {},
         [
@@ -169,7 +182,7 @@ def test_malformed_json_can_be_returned_as_an_error(name, raw):
 
 
 @pytest.mark.parametrize("name", ["openai", "anthropic", "chat_completions"])
-def test_native_reasoning_with_tools_is_not_silently_discarded(name):
+def test_decoders_extract_text_and_tools_from_reasoning_responses(name):
     raw = reply(name)
     if name == "openai":
         raw["output"].insert(0, {"type": "reasoning", "encrypted_content": "opaque"})
@@ -177,19 +190,17 @@ def test_native_reasoning_with_tools_is_not_silently_discarded(name):
         raw["content"].insert(0, {"type": "thinking", "thinking": "private", "signature": "sig"})
     else:
         raw["choices"][0]["message"]["reasoning_details"] = [{"type": "reasoning.encrypted"}]
-    with pytest.raises(ValueError, match="reasoning"):
-        codec(name).decode_response(raw)
+    assert provider(name)._decode(sdk_response(raw)) == ("  answer\n", [request()])
 
 
-def test_openai_rejects_a_message_without_text_blocks():
+def test_openai_returns_empty_text_when_no_text_blocks_exist():
     raw = reply("openai", calls=False)
     raw["output"][0]["content"] = []
-    with pytest.raises(ValueError, match="content"):
-        codec("openai").decode_response(raw)
+    assert provider("openai")._decode(sdk_response(raw)) == ("", [])
 
 
 @pytest.mark.parametrize("name", ["openai", "anthropic", "chat_completions"])
-def test_duplicate_model_requests_are_rejected(name):
+def test_duplicate_model_requests_are_preserved(name):
     raw = reply(name)
     if name == "openai":
         raw["output"].append(deepcopy(raw["output"][-1]))
@@ -198,5 +209,32 @@ def test_duplicate_model_requests_are_rejected(name):
     else:
         calls = raw["choices"][0]["message"]["tool_calls"]
         calls.append(deepcopy(calls[0]))
-    with pytest.raises(ValueError, match="duplicate"):
-        codec(name).decode_response(raw)
+    _, requests = provider(name)._decode(sdk_response(raw))
+    assert len(requests) == 2 and requests[0] == requests[1]
+
+
+@pytest.mark.parametrize("name", ["openai", "anthropic", "chat_completions"])
+def test_invalid_response_errors_do_not_include_response_content(name):
+    raw = reply(name, text={"private": "sensitive-response-content"})
+    if name == "chat_completions":
+        response = sdk_response(raw)
+        assert provider(name)._decode(response)[0] is response.choices[0].message.content
+        return
+    with pytest.raises((TypeError, ValueError)) as caught:
+        provider(name)._decode(sdk_response(raw))
+    assert "sensitive-response-content" not in str(caught.value)
+
+
+@pytest.mark.parametrize("name", ["openai", "anthropic", "chat_completions"])
+@pytest.mark.parametrize("field,value", [("id", ""), ("id", 1), ("name", " "), ("name", None)])
+def test_completed_response_preserves_tool_request_fields(name, field, value):
+    raw = reply(name)
+    if name == "openai":
+        raw["output"][-1]["call_id" if field == "id" else field] = value
+    elif name == "anthropic":
+        raw["content"][-1][field] = value
+    else:
+        call = raw["choices"][0]["message"]["tool_calls"][0]
+        (call if field == "id" else call["function"])[field] = value
+    _, requests = provider(name)._decode(sdk_response(raw))
+    assert requests[0][field] == value

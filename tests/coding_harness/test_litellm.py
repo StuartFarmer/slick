@@ -8,6 +8,7 @@ from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
+from sdk_fakes import sdk_response
 
 from examples.coding_harness import __main__ as cli
 from examples.coding_harness.session import load_session, restore_session, save_session
@@ -40,7 +41,7 @@ def install_sdk(monkeypatch, responses, requests):
     async def acompletion(**request):
         requests.append(deepcopy(request))
         response = responses.pop(0)
-        return SimpleNamespace(model_dump=lambda **kwargs: deepcopy(response))
+        return sdk_response(response)
 
     monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(acompletion=acompletion))
 
@@ -111,12 +112,10 @@ def test_litellm_session_round_trip_preserves_history(repo, tmp_path, monkeypatc
     [
         reply(finish="length"),
         reply(finish="content_filter"),
-        reply(None),
-        reply(None, [tool_call(), tool_call()]),
         reply("Bad", [tool_call()], finish="stop"),
     ],
 )
-def test_invalid_turns_fail_before_tool_execution(monkeypatch, response):
+def test_available_output_is_returned_without_tool_execution(monkeypatch, response):
     from slick.providers import LiteLLMAPI as LiteLLMProvider
 
     def list_files() -> list[str]:
@@ -124,8 +123,9 @@ def test_invalid_turns_fail_before_tool_execution(monkeypatch, response):
         raise AssertionError("Providers must not execute tools")
 
     install_sdk(monkeypatch, [response], [])
-    with pytest.raises(ProviderError):
-        asyncio.run(LiteLLMProvider(MODEL).acall("Go", tools=[list_files]))
+    text, calls = asyncio.run(LiteLLMProvider(MODEL).acall("Go", tools=[list_files]))
+    assert text == (response["choices"][0]["message"]["content"] or "")
+    assert len(calls) == len(response["choices"][0]["message"].get("tool_calls") or [])
 
 
 def test_bad_arguments_are_recoverable_and_no_tools_are_allowed_in_summary(monkeypatch):

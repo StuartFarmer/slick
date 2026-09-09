@@ -1,4 +1,4 @@
-"""Real optional SDK serialization/parsing against an offline HTTP transport."""
+"""Real SDK requests through offline HTTP transports and provider-owned clients."""
 
 import asyncio
 import json
@@ -6,266 +6,165 @@ import socket
 import sys
 
 import pytest
+from test_tool_providers import read, reply
 
-from slick.providers import AnthropicAPI, OpenAIAPI
+from slick import Session
+from slick.providers import AnthropicAPI, OpenAIAPI, OpenRouterAPI, ProviderError
 
 httpx = pytest.importorskip("httpx")
+PROVIDERS = {"openai": OpenAIAPI, "anthropic": AnthropicAPI, "chat_completions": OpenRouterAPI}
 
 
-@pytest.mark.parametrize("source,target", [("openai", "anthropic"), ("anthropic", "chat")])
-def test_session_switches_provider_with_real_sdk_transports(source, target, monkeypatch):
-    from test_tool_providers import reply
-
-    from slick import Session
-    from slick.providers import OpenRouterAPI
-
-    openai = pytest.importorskip("openai")
-    anthropic = pytest.importorskip("anthropic")
-    effects, captured = [], []
-
-    def no_network(*args, **kwargs):
-        raise AssertionError("unexpected network")
-
-    monkeypatch.setattr(socket.socket, "connect", no_network)
-    monkeypatch.setattr(socket, "getaddrinfo", no_network)
-
-    def read(path: str) -> str:
-        """Read a file."""
-        effects.append(path)
-        return "actual file content"
-
-    def respond(request):
-        captured.append(json.loads(request.content))
-        name = source if len(captured) == 1 else target
-        raw = reply("chat_completions" if name == "chat" else name, calls=len(captured) == 1)
-        raw.update(id="offline", model="test-model")
-        if name == "anthropic":
-            raw.update(
-                type="message", role="assistant", usage={"input_tokens": 1, "output_tokens": 2}
-            )
-        elif name == "openai":
-            raw.update(object="response", created_at=0)
-        else:
-            raw.update(object="chat.completion", created=0)
-            raw["choices"][0]["index"] = 0
-        return httpx.Response(200, json=raw)
-
-    async def scenario():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            providers = {
-                "openai": OpenAIAPI(
-                    "test-model",
-                    async_client=openai.AsyncOpenAI(api_key="offline", http_client=client),
-                ),
-                "anthropic": AnthropicAPI(
-                    "test-model",
-                    async_client=anthropic.AsyncAnthropic(api_key="offline", http_client=client),
-                ),
-                "chat": OpenRouterAPI(
-                    "test-model",
-                    api_key="offline",
-                    async_client=openai.AsyncOpenAI(api_key="offline", http_client=client),
-                ),
-            }
-            session = Session(provider=providers[source], tools=[read])
-            await session.acall("OLD_CONTEXT")
-            await session.resolve_pending()
-            assert await session.acall("NEW_CONTEXT", provider=providers[target]) == (
-                "  answer\n",
-                [],
-            )
-            assert effects == ["a.py"]
-            assert not session.ready_results and not client.is_closed
-
-    asyncio.run(scenario())
-    assert len(captured) == 2
-    assert "OLD_CONTEXT" not in json.dumps(captured[1])
-    assert "actual file content" in json.dumps(captured[1])
-    if target == "anthropic":
-        assert captured[1]["messages"][-1]["content"][0]["type"] == "tool_result"
+def wire_reply(name, *, calls=False):
+    raw = reply(name, calls=calls)
+    raw.update(id="offline", model="test-model")
+    if name == "anthropic":
+        raw.update(type="message", role="assistant", usage={"input_tokens": 1, "output_tokens": 2})
+    elif name == "openai":
+        raw.update(object="response", created_at=0)
     else:
-        assert captured[1]["messages"][-1]["role"] == "tool"
+        raw.update(object="chat.completion", created=0)
+        raw["choices"][0]["index"] = 0
+    return raw
 
 
-@pytest.mark.parametrize("name", ["openai", "anthropic", "openrouter", "litellm"])
-@pytest.mark.parametrize("asynchronous", [False, True])
-def test_real_sdk_tool_exchange_with_fresh_provider(name, asynchronous, monkeypatch):
-    from test_tool_providers import read, reply
-
-    from slick.providers import LiteLLMAPI, OpenRouterAPI
+def install_transport(monkeypatch, names, asynchronous, respond):
+    """Replace SDK constructors only in tests; each gets a fresh offline transport."""
+    clients = []
+    monkeypatch.setenv("OPENAI_API_KEY", "offline-openai")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "offline-anthropic")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-router")
 
     def no_network(*args, **kwargs):
         raise AssertionError("unexpected external network access")
 
     monkeypatch.setattr(socket.socket, "connect", no_network)
     monkeypatch.setattr(socket, "getaddrinfo", no_network)
-    format = name if name in {"openai", "anthropic"} else "chat_completions"
-    captured = []
-
-    def respond(request):
-        captured.append(json.loads(request.content))
-        raw = reply(format, calls=len(captured) == 1)
-        raw.update(id="offline", model="test-model")
-        if format == "chat_completions":
-            raw.update(object="chat.completion", created=0)
-            raw["choices"][0]["index"] = 0
-        elif format == "anthropic":
-            raw.update(
-                type="message", role="assistant", usage={"input_tokens": 1, "output_tokens": 2}
-            )
-        else:
-            raw.update(object="response", created_at=0)
-        return httpx.Response(200, json=raw)
-
-    if name == "litellm":
-        if sys.version_info >= (3, 15):
-            pytest.skip("LiteLLM Python range")
-        monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
-        sdk = pytest.importorskip("litellm")
-        monkeypatch.setattr(sdk, "telemetry", False)
-        monkeypatch.setattr(
-            sdk, "in_memory_llm_clients_cache", type(sdk.in_memory_llm_clients_cache)()
+    for sdk_name in {"anthropic" if name == "anthropic" else "openai" for name in names}:
+        sdk = pytest.importorskip(sdk_name)
+        class_name = ("Async" if asynchronous else "") + (
+            "Anthropic" if sdk_name == "anthropic" else "OpenAI"
         )
-    else:
-        sdk = pytest.importorskip("anthropic" if name == "anthropic" else "openai")
+        original = getattr(sdk, class_name)
 
-    def build(http_client):
-        if name == "litellm":
-            monkeypatch.setattr(
-                sdk, "aclient_session" if asynchronous else "client_session", http_client
-            )
-            return LiteLLMAPI(
-                "openai/test-model", api_base="http://offline.test/v1", api_key="offline"
-            )
-        client_class = ("Async" if asynchronous else "") + (
-            "Anthropic" if name == "anthropic" else "OpenAI"
-        )
-        client = getattr(sdk, client_class)(api_key="offline", http_client=http_client)
-        kwargs = {"async_client" if asynchronous else "client": client}
-        if name == "openrouter":
-            kwargs["api_key"] = "offline"
-        cls = {"openai": OpenAIAPI, "anthropic": AnthropicAPI, "openrouter": OpenRouterAPI}[name]
-        return cls("test-model", **kwargs)
+        def factory(_original=original, **options):
+            http = httpx.AsyncClient if asynchronous else httpx.Client
+            client = http(transport=httpx.MockTransport(respond))
+            clients.append(client)
+            return _original(http_client=client, **options)
 
-    transport = httpx.MockTransport(respond)
-    if asynchronous:
-
-        async def run():
-            async with httpx.AsyncClient(transport=transport) as http_client:
-                _, requests = await build(http_client).acall("OLD_CONTEXT", tools=[read])
-                results = json.loads(json.dumps([{"request": requests[0], "content": "found"}]))
-                assert await build(http_client).acall("NEW_CONTEXT", tool_results=results) == (
-                    "  answer\n",
-                    [],
-                )
-                assert not http_client.is_closed
-
-        asyncio.run(run())
-    else:
-        with httpx.Client(transport=transport) as http_client:
-            _, requests = build(http_client).call("OLD_CONTEXT", tools=[read])
-            results = json.loads(json.dumps([{"request": requests[0], "content": "found"}]))
-            assert build(http_client).call("NEW_CONTEXT", tool_results=results) == (
-                "  answer\n",
-                [],
-            )
-            assert not http_client.is_closed
-    assert len(captured) == 2
-    assert "OLD_CONTEXT" not in json.dumps(captured[1])
-    assert "NEW_CONTEXT" in json.dumps(captured[1])
-    assert "found" in json.dumps(captured[1])
-    assert "tools" not in captured[1]
+        monkeypatch.setattr(sdk, class_name, factory)
+    return clients
 
 
+@pytest.mark.parametrize("name", PROVIDERS)
 @pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("outcome", ["stop", "length", "rate_limit"])
-def test_openrouter_sdk_uses_fixed_endpoint_and_explicit_credentials(
-    monkeypatch, asynchronous, outcome
-):
-    from slick.providers import OpenRouterAPI, ProviderError
-
-    sdk = pytest.importorskip("openai")
+def test_real_sdk_exchange_creates_and_closes_clients(name, asynchronous, monkeypatch):
     requests = []
-
-    def no_network(*args, **kwargs):
-        raise AssertionError("unexpected external network access")
-
-    monkeypatch.setattr(socket.socket, "connect", no_network)
-    monkeypatch.setattr(socket, "getaddrinfo", no_network)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "environment-key")
 
     def respond(request):
         requests.append(request)
-        if outcome == "rate_limit":
-            return httpx.Response(
-                429, json={"error": {"message": "offline"}}, headers={"retry-after": "0"}
-            )
-        return httpx.Response(
-            200,
-            json={
-                "id": "offline",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "vendor/model",
-                "choices": [
-                    {
-                        "index": 0,
-                        "finish_reason": outcome,
-                        "message": {
-                            "role": "assistant",
-                            "content": "  answer\n",
-                        },
-                    }
-                ],
-            },
+        return httpx.Response(200, json=wire_reply(name, calls=len(requests) == 1))
+
+    clients = install_transport(monkeypatch, [name], asynchronous, respond)
+    provider = PROVIDERS[name]("test-model", timeout=12.5)
+
+    def invoke(context, **kwargs):
+        return (
+            asyncio.run(provider.acall(context, **kwargs))
+            if asynchronous
+            else provider.call(context, **kwargs)
         )
 
-    options = {"model": "vendor/model", "api_key": "explicit-router-key", "timeout": 12.5}
-    transport = httpx.MockTransport(respond)
-    if asynchronous:
+    text, calls = invoke("OLD_CONTEXT", tools=[read])
+    assert text == "  answer\n" and calls[0]["arguments"] == {"path": "a.py"}
+    assert invoke("NEW_CONTEXT", tool_results=[{"request": calls[0], "content": "found"}]) == (
+        "  answer\n",
+        [],
+    )
+    assert len(clients) == len(requests) == 2
+    assert all(client.is_closed for client in clients)
+    body = json.loads(requests[1].content)
+    assert "NEW_CONTEXT" in json.dumps(body) and "OLD_CONTEXT" not in json.dumps(body)
+    assert "found" in json.dumps(body) and "tools" not in body
+    assert requests[0].extensions["timeout"]["read"] == 12.5
+    if name == "chat_completions":
+        assert str(requests[0].url) == "https://openrouter.ai/api/v1/chat/completions"
+        assert requests[0].headers["authorization"] == "Bearer offline-router"
 
-        async def run():
-            async with httpx.AsyncClient(transport=transport) as http_client:
-                async with sdk.AsyncOpenAI(
-                    api_key="wrong-client-key",
-                    base_url="http://wrong.test/v1",
-                    http_client=http_client,
-                ) as client:
-                    provider = OpenRouterAPI(**options, async_client=client)
-                    if outcome == "stop":
-                        assert await provider.acall("prompt\n") == ("  answer\n", [])
-                    else:
-                        with pytest.raises(ProviderError):
-                            await provider.acall("prompt\n")
-                    assert not http_client.is_closed
 
-        asyncio.run(run())
-    else:
-        with httpx.Client(transport=transport) as http_client:
-            with sdk.OpenAI(
-                api_key="wrong-client-key",
-                base_url="http://wrong.test/v1",
-                http_client=http_client,
-            ) as client:
-                provider = OpenRouterAPI(**options, client=client)
-                if outcome == "stop":
-                    assert provider.call("prompt\n") == ("  answer\n", [])
-                else:
-                    with pytest.raises(ProviderError):
-                        provider.call("prompt\n")
-                assert not http_client.is_closed
+@pytest.mark.parametrize("name", PROVIDERS)
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_sdk_rate_limit_is_not_retried_and_clients_close(name, asynchronous, monkeypatch):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(
+            429, json={"error": {"type": "rate_limit_error", "message": "offline"}}
+        )
+
+    clients = install_transport(monkeypatch, [name], asynchronous, respond)
+    provider = PROVIDERS[name]("test-model")
+    with pytest.raises(ProviderError):
+        asyncio.run(provider.acall("input")) if asynchronous else provider.call("input")
     assert len(requests) == 1
-    request = requests[0]
-    assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
-    assert request.headers["authorization"] == "Bearer explicit-router-key"
-    assert request.extensions["timeout"]["read"] == 12.5
-    assert json.loads(request.content) == {
-        "model": "vendor/model",
-        "messages": [{"role": "user", "content": "prompt\n"}],
-        "max_tokens": 2048,
-        "stream": False,
-        "n": 1,
-    }
+    assert clients[0].is_closed
+
+
+@pytest.mark.parametrize("name", PROVIDERS)
+def test_async_cancellation_closes_real_sdk_client(name, monkeypatch):
+    async def scenario():
+        started = asyncio.Event()
+
+        async def respond(request):
+            started.set()
+            await asyncio.Event().wait()
+
+        clients = install_transport(monkeypatch, [name], True, respond)
+        task = asyncio.create_task(PROVIDERS[name]("test-model").acall("input"))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert clients[0].is_closed
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "source,target", [("openai", "anthropic"), ("anthropic", "chat_completions")]
+)
+def test_session_switches_provider_using_real_sdks(source, target, monkeypatch):
+    requests, effects = [], []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(
+            200, json=wire_reply(source if len(requests) == 1 else target, calls=len(requests) == 1)
+        )
+
+    clients = install_transport(monkeypatch, [source, target], True, respond)
+
+    def read(path: str):
+        effects.append(path)
+        return "file content"
+
+    async def scenario():
+        session = Session(provider=PROVIDERS[source]("test-model"), tools=[read])
+        await session.acall("OLD_CONTEXT")
+        await session.resolve_pending()
+        assert await session.acall("NEW_CONTEXT", provider=PROVIDERS[target]("test-model")) == (
+            "  answer\n",
+            [],
+        )
+        assert effects == ["a.py"] and not session.ready_results
+
+    asyncio.run(scenario())
+    assert all(client.is_closed for client in clients)
+    assert "file content" in requests[1].content.decode()
 
 
 @pytest.mark.skipif(sys.version_info >= (3, 15), reason="LiteLLM Python range")
@@ -329,7 +228,7 @@ def test_litellm_real_sdk_uses_offline_transport(monkeypatch, asynchronous, fini
         async def run():
             async with httpx.AsyncClient(transport=transport) as http_client:
                 monkeypatch.setattr(sdk, "aclient_session", http_client)
-                if finish_reason == "stop":
+                if finish_reason != "rate_limit":
                     assert await provider_instance.acall("prompt\n") == ("  answer\n", [])
                 else:
                     with pytest.raises(ProviderError):
@@ -340,7 +239,7 @@ def test_litellm_real_sdk_uses_offline_transport(monkeypatch, asynchronous, fini
     else:
         with httpx.Client(transport=transport) as http_client:
             monkeypatch.setattr(sdk, "client_session", http_client)
-            if finish_reason == "stop":
+            if finish_reason != "rate_limit":
                 assert provider_instance.call("prompt\n") == ("  answer\n", [])
             else:
                 with pytest.raises(ProviderError):
@@ -354,191 +253,3 @@ def test_litellm_real_sdk_uses_offline_transport(monkeypatch, asynchronous, fini
     assert body["messages"] == [{"role": "user", "content": "prompt\n"}]
     assert requests[0].extensions["timeout"]["read"] == 12.5
     assert not blocked
-
-
-CASES = [
-    (
-        "openai",
-        "OpenAI",
-        OpenAIAPI,
-        "/v1/responses",
-        {"model": "test-model", "input": "prompt\n", "max_output_tokens": 123, "store": False},
-        {
-            "id": "resp_test",
-            "object": "response",
-            "created_at": 1700000000,
-            "status": "completed",
-            "error": None,
-            "incomplete_details": None,
-            "instructions": None,
-            "model": "test-model",
-            "output": [
-                {
-                    "id": "msg_test",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": "  answer\n", "annotations": []}],
-                }
-            ],
-            "parallel_tool_calls": True,
-            "temperature": 1.0,
-            "tool_choice": "auto",
-            "tools": [],
-            "top_p": 1.0,
-            "metadata": {},
-            "usage": {
-                "input_tokens": 2,
-                "input_tokens_details": {"cached_tokens": 0},
-                "output_tokens": 3,
-                "output_tokens_details": {"reasoning_tokens": 0},
-                "total_tokens": 5,
-            },
-        },
-    ),
-    (
-        "anthropic",
-        "Anthropic",
-        AnthropicAPI,
-        "/v1/messages",
-        {
-            "model": "test-model",
-            "messages": [{"role": "user", "content": "prompt\n"}],
-            "max_tokens": 123,
-        },
-        {
-            "id": "msg_test",
-            "type": "message",
-            "role": "assistant",
-            "model": "test-model",
-            "content": [{"type": "text", "text": "  answer\n"}],
-            "stop_reason": "end_turn",
-            "stop_sequence": None,
-            "usage": {"input_tokens": 2, "output_tokens": 3},
-        },
-    ),
-]
-
-
-@pytest.mark.parametrize("provider,sdk_class,provider_class,path,body,reply", CASES)
-@pytest.mark.parametrize("asynchronous", [False, True])
-def test_real_sdk_request_and_response_leave_injected_transport_open(
-    provider, sdk_class, provider_class, path, body, reply, asynchronous
-):
-    sdk = pytest.importorskip(provider)
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        return httpx.Response(200, json=reply)
-
-    transport = httpx.MockTransport(respond)
-    options = {"timeout": 12.5, "max_output_tokens": 123}
-    if asynchronous:
-
-        async def run():
-            async with httpx.AsyncClient(transport=transport) as http_client:
-                client = getattr(sdk, "Async" + sdk_class)(
-                    api_key="offline-test-key", http_client=http_client
-                )
-                provider_instance = provider_class("test-model", async_client=client, **options)
-                assert await provider_instance.acall("prompt\n") == ("  answer\n", [])
-                assert not http_client.is_closed
-                assert not client.is_closed()
-
-        asyncio.run(run())
-    else:
-        with httpx.Client(transport=transport) as http_client:
-            client = getattr(sdk, sdk_class)(api_key="offline-test-key", http_client=http_client)
-            provider_instance = provider_class("test-model", client=client, **options)
-            assert provider_instance.call("prompt\n") == ("  answer\n", [])
-            assert not http_client.is_closed
-            assert not client.is_closed()
-
-    assert len(requests) == 1
-    assert requests[0].method == "POST"
-    assert requests[0].url.path == path
-    assert json.loads(requests[0].content) == body
-    assert requests[0].extensions["timeout"]["read"] == 12.5
-
-
-@pytest.mark.parametrize("provider,sdk_class,provider_class,path,body,reply", CASES)
-def test_real_sdk_native_turns_replay_original_call_and_correlated_result(
-    provider, sdk_class, provider_class, path, body, reply
-):
-    from copy import deepcopy
-
-    sdk = pytest.importorskip(provider)
-    first = deepcopy(reply)
-    if provider == "openai":
-        first["output"] = [
-            {
-                "type": "function_call",
-                "id": "fc1",
-                "call_id": "call_1",
-                "name": "read",
-                "arguments": '{"key":"intro"}',
-                "status": "completed",
-            },
-        ]
-    else:
-        first["stop_reason"] = "tool_use"
-        first["content"] = [
-            {"type": "tool_use", "id": "call_1", "name": "read", "input": {"key": "intro"}},
-        ]
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        return httpx.Response(200, json=first if len(requests) == 1 else reply)
-
-    def read(key: str) -> str:
-        """Read a document."""
-        raise AssertionError("provider executed a tool")
-
-    async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
-            client = getattr(sdk, "Async" + sdk_class)(api_key="offline", http_client=http_client)
-            provider_instance = provider_class("test-model", async_client=client, timeout=12.5)
-            text, calls = await provider_instance.acall("read intro", tools=[read])
-            assert calls[0]["arguments"] == {"key": "intro"}
-            final = await provider_instance.acall(
-                "New context",
-                tools=[read],
-                tool_results=[{"request": calls[0], "content": "Introduction"}],
-            )
-            assert final == ("  answer\n", [])
-            assert not http_client.is_closed and not client.is_closed()
-
-    asyncio.run(run())
-    assert len(requests) == 2
-    assert all(request.url.path == path for request in requests)
-    assert all(request.extensions["timeout"]["read"] == 12.5 for request in requests)
-    first_body, second = (json.loads(request.content) for request in requests)
-    assert "instructions" not in first_body and "system" not in first_body
-    if provider == "openai":
-        assert first_body["tools"][0]["strict"] is False
-        assert second["input"][-1] == {
-            "type": "function_call_output",
-            "call_id": "call_1",
-            "output": "Introduction",
-        }
-        calls = [item for item in second["input"] if item.get("type") == "function_call"]
-        assert len(calls) == 1 and calls[0]["call_id"] == "call_1"
-        assert json.loads(calls[0]["arguments"]) == {"key": "intro"}
-    else:
-        assert "input_schema" in first_body["tools"][0]
-        assert second["messages"][-1] == {
-            "role": "user",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": "call_1",
-                    "content": "Introduction",
-                    "is_error": False,
-                },
-            ],
-        }
-        calls = [item for item in second["messages"][-2]["content"] if item["type"] == "tool_use"]
-        assert len(calls) == 1 and calls[0]["id"] == "call_1"
-        assert calls[0]["input"] == {"key": "intro"}

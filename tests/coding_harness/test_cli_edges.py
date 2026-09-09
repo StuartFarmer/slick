@@ -36,7 +36,7 @@ def test_missing_workspace_executable_fails_before_model_use(repo, monkeypatch, 
         lambda executable: None if executable == missing else original(executable),
     )
     # Initialization must fail before the provider needs even an identity/model call.
-    monkeypatch.setattr(cli, "OpenAIAPI", lambda **kwargs: object())
+    monkeypatch.setattr(cli.providers, "OpenAIAPI", lambda **kwargs: object())
     before = (repo / "sample.py").read_bytes()
     assert cli.main(real_provider_args(repo)) == 1
     assert f"{missing} is required" in capsys.readouterr().err
@@ -47,7 +47,7 @@ def test_missing_explicit_config_fails_without_constructing_provider(repo, monke
     def forbidden_provider(**kwargs):
         raise AssertionError("A missing config must fail before constructing a provider")
 
-    monkeypatch.setattr(cli, "OpenAIAPI", forbidden_provider)
+    monkeypatch.setattr(cli.providers, "OpenAIAPI", forbidden_provider)
     missing = repo / "missing-checks.json"
     assert cli.main([*real_provider_args(repo), "--config", str(missing)]) == 1
     error = capsys.readouterr().err
@@ -172,7 +172,7 @@ def test_default_provider_uses_openai_for_live_workspace(repo, monkeypatch, caps
         assert model == "offline-test"
         raise RuntimeError("OpenAI unavailable in offline test")
 
-    monkeypatch.setattr(cli, "OpenAIAPI", unavailable_provider)
+    monkeypatch.setattr(cli.providers, "OpenAIAPI", unavailable_provider)
     assert cli.main(real_provider_args(repo)[2:]) == 1
     assert "OpenAI unavailable in offline test" in capsys.readouterr().err
 
@@ -206,8 +206,8 @@ def test_resume_selects_provider_and_model(repo, tmp_path, monkeypatch, provider
 
         return factory
 
-    monkeypatch.setattr(cli, "OpenAIAPI", build("openai"))
-    monkeypatch.setattr(cli, "AnthropicAPI", build("anthropic"))
+    monkeypatch.setattr(cli.providers, "OpenAIAPI", build("openai"))
+    monkeypatch.setattr(cli.providers, "AnthropicAPI", build("anthropic"))
     args = ["--resume", str(path), "--headless", "--task", "Continue"]
     if provider_name:
         args += ["--provider", provider_name]

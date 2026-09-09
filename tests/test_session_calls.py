@@ -41,36 +41,19 @@ def test_context_and_provider_override_are_explicit():
 
 
 @pytest.mark.parametrize("context", [None, 4, [], ""])
-def test_invalid_context_does_not_call_provider(context):
-    provider = Script()
+def test_context_is_forwarded_to_provider(context):
+    provider = Script(("ok", []))
     session = Session(provider=provider)
-    with pytest.raises(ValueError):
-        asyncio.run(session.acall(context))
-    assert provider.inputs == [] and session.history == []
+    assert asyncio.run(session.acall(context)) == ("ok", [])
+    assert provider.inputs == [(context, [])]
 
 
-def test_missing_provider_and_invalid_definitions_fail_early():
+def test_missing_provider_fails_early():
     with pytest.raises(ValueError, match="provider"):
         asyncio.run(Session().acall("hello"))
-    with pytest.raises(ValueError):
-        Session(tools=[lambda x: x])
 
 
-@pytest.mark.parametrize(
-    "answer",
-    [
-        "text",
-        (3, []),
-        ("", [{}]),
-        (
-            "",
-            [
-                {"id": "same", "name": "search", "arguments": {}},
-                {"id": "same", "name": "search", "arguments": {}},
-            ],
-        ),
-    ],
-)
+@pytest.mark.parametrize("answer", ["text", ("ok",)])
 def test_invalid_response_does_not_record_exchange(answer):
     session = Session(provider=Script(answer), tools=[search])
     with pytest.raises(ValueError):

@@ -57,6 +57,16 @@ def snapshot():
     }
 
 
+def test_snapshot_errors_identify_nested_fields():
+    from pydantic import ValidationError
+
+    data = snapshot()
+    data["history"][0]["work"][0]["submitted"] = 1
+    with pytest.raises(ValidationError) as caught:
+        Session.from_dict(data)
+    assert caught.value.errors()[0]["loc"] == ("history", 0, "work", 0, "submitted")
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -76,7 +86,6 @@ def snapshot():
         lambda d: d["history"][0]["work"][0].update(
             result={"request": request(query="different"), "content": "x", "is_error": False}
         ),
-        lambda d: d["history"][0]["work"][0]["request"]["arguments"].update(query=float("nan")),
     ],
 )
 def test_invalid_snapshots_reject_without_mutating_input(change):

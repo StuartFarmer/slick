@@ -2,21 +2,15 @@
 
 import asyncio
 import json
+import sys
 from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
+from sdk_fakes import sdk_response
 from test_tool_providers import read, reply
 
 from slick.providers import AnthropicAPI, LiteLLMAPI, OpenAIAPI, OpenRouterAPI, ProviderError
-
-
-class JsonResponse:
-    def __init__(self, data):
-        self.data = data
-
-    def model_dump(self, **kwargs):
-        return deepcopy(self.data)
 
 
 class Client:
@@ -27,14 +21,23 @@ class Client:
         self.responses = self.messages = SimpleNamespace(create=create)
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=create))
 
-    def with_options(self, **kwargs):
+    def __enter__(self):
         return self
+
+    def __exit__(self, *args):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
 
     def create(self, **kwargs):
         self.requests.append(deepcopy(kwargs))
         if isinstance(self.data, BaseException):
             raise self.data
-        return JsonResponse(self.data)
+        return sdk_response(self.data)
 
     async def acreate(self, **kwargs):
         return self.create(**kwargs)
@@ -48,21 +51,19 @@ def build(name, client, asynchronous, monkeypatch):
         "litellm": LiteLLMAPI,
     }[name]
     if name == "litellm":
-        from slick.providers import _litellm
-
-        monkeypatch.setattr(
-            _litellm,
-            "_sdk",
-            lambda: SimpleNamespace(
+        monkeypatch.setitem(
+            sys.modules,
+            "litellm",
+            SimpleNamespace(
                 completion=client.create,
                 acompletion=client.acreate,
             ),
         )
         return cls("vendor/model")
-    kwargs = {"async_client" if asynchronous else "client": client}
-    if name == "openrouter":
-        kwargs["api_key"] = "offline"
-    return cls("model", **kwargs)
+    sdk = "Anthropic" if name == "anthropic" else "OpenAI"
+    factory = ("Async" if asynchronous else "") + sdk
+    monkeypatch.setitem(sys.modules, sdk.lower(), SimpleNamespace(**{factory: lambda **kw: client}))
+    return cls("model", **({"api_key": "offline"} if name == "openrouter" else {}))
 
 
 def invoke(provider, asynchronous, context, **kwargs):
@@ -112,8 +113,8 @@ def test_unadvertised_tools_and_transport_errors(name, monkeypatch):
     format = name if name in {"openai", "anthropic"} else "chat_completions"
     client = Client(reply(format))
     provider = build(name, client, False, monkeypatch)
-    with pytest.raises(ProviderError):
-        provider.call("context")
+    _, requests = provider.call("context")
+    assert requests[0]["name"] == "read"
     failure = RuntimeError("offline failure")
     client.data = failure
     with pytest.raises(ProviderError) as error:
@@ -141,3 +142,13 @@ def test_interleaved_exchanges_do_not_replace_each_others_requests(name, monkeyp
     wire = json.dumps(client.requests[-1])
     assert "a.py" in wire and "b.py" not in wire
     assert results == original
+
+
+@pytest.mark.parametrize("name", ["openai", "anthropic", "openrouter", "litellm"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("raw", [None, [], {"choices": [None]}])
+def test_malformed_sdk_responses_raise_provider_errors(name, asynchronous, raw, monkeypatch):
+    client = Client(raw, asynchronous)
+    provider = build(name, client, asynchronous, monkeypatch)
+    with pytest.raises(ProviderError):
+        invoke(provider, asynchronous, "context")

@@ -41,7 +41,9 @@ def test_batch_resolution_and_repeated_individual_resolution_execute_once():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("failure", [RuntimeError("offline"), (42, []), asyncio.CancelledError()])
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("offline"), ("incomplete",), asyncio.CancelledError()]
+)
 def test_failed_call_preserves_results_and_allows_provider_switch(failure):
     async def scenario():
         provider = Script(("", [request(query="pricing")]), failure)
@@ -107,7 +109,7 @@ def test_effect_then_execution_or_result_failure_is_not_retried(bad_return):
         effects.append("effect")
         if not bad_return:
             raise RuntimeError("failed after write")
-        return "wrong type"
+        return object()
 
     call = request("write")
     session = Session(provider=Script(("", [call])), tools=[write])
@@ -216,7 +218,9 @@ def test_ordinary_tool_error_does_not_stop_batch():
     assert results[1]["content"] == "second" and not results[1]["is_error"]
 
 
-def test_incompatible_provider_payload_preserves_ready_work():
+def test_incompatible_provider_payload_preserves_ready_work(monkeypatch):
+    from test_api_providers import Client, install_sdk
+
     from slick.providers import AnthropicAPI, ProviderError
 
     call = {"id": "a", "name": "search", "arguments": "{", "argument_error": "Invalid JSON"}
@@ -224,10 +228,13 @@ def test_incompatible_provider_payload_preserves_ready_work():
     asyncio.run(session.acall("Go"))
     results = asyncio.run(session.resolve_pending())
     before = session.history
-    # Conversion fails before the unused client can perform any I/O.
-    provider = AnthropicAPI("offline", async_client=object())
+    failure = ValueError("SDK rejected malformed input")
+    client = Client(failure, asynchronous=True)
+    install_sdk(monkeypatch, "Anthropic", lambda **kw: client, asynchronous=True)
+    provider = AnthropicAPI("offline")
     with pytest.raises(ProviderError) as raised:
         asyncio.run(session.acall("Continue", provider=provider))
-    assert "malformed JSON" in str(raised.value.__cause__)
+    assert raised.value.__cause__ is failure
+    assert client.state["requests"][0][1]["messages"][-2]["content"][0]["input"] == "{"
     assert session.ready_results == results
     assert session.history == before

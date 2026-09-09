@@ -25,7 +25,7 @@ def test_explicit_api_provider_receives_stdin_and_model(monkeypatch, capsys, tmp
         seen.append(kwargs)
         return NS(call=lambda text: ("answer:" + text, []))
 
-    monkeypatch.setattr(cli, cls, factory)
+    monkeypatch.setattr(cli.providers, cls, factory)
     monkeypatch.setattr("sys.stdin", StringIO("question\n"))
     output = tmp_path / "nested" / "answer.txt"
     args = ["call", "--provider", name, "--model", "private", "--output", str(output)]
@@ -41,38 +41,42 @@ def test_explicit_api_provider_receives_stdin_and_model(monkeypatch, capsys, tmp
 
 
 @pytest.mark.parametrize("name", ["litellm", "openai", "anthropic", "openrouter"])
-def test_api_model_is_required_even_when_cli_default_exists(monkeypatch, capsys, name):
-    monkeypatch.setenv("SLICK_MODEL", "cli-default")
+def test_api_model_is_required(capsys, name):
     assert cli.main(["call", "prompt", "--provider", name]) == 2
     assert "--model" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("name", [None, "codex", "claude", "openai", "anthropic", "openrouter"])
+@pytest.mark.parametrize("name", ["codex", "claude", "openai", "anthropic", "openrouter"])
 def test_endpoint_flag_is_rejected_for_other_providers(capsys, name):
     args = ["call", "prompt", "--api-base", "http://localhost:8000", "--model", "test"]
-    if name:
-        args.extend(["--provider", name])
+    args.extend(["--provider", name])
     assert cli.main(args) == 2
     assert "--api-base" in capsys.readouterr().err
 
 
-def test_omitted_provider_uses_legacy_resolution(monkeypatch, capsys):
+@pytest.mark.parametrize("name,cls", [("codex", "CodexCLI"), ("claude", "ClaudeCLI")])
+@pytest.mark.parametrize("model", [None, "selected"])
+def test_cli_provider_receives_explicit_model(monkeypatch, capsys, name, cls, model):
     seen = []
 
-    def get_command(provider, model):
-        seen.append((provider, model))
-        return NS(call=lambda text: ("legacy:" + text, []))
+    def factory(**kwargs):
+        seen.append(kwargs)
+        return NS(call=lambda text: ("answer:" + text, []))
 
-    monkeypatch.setattr(cli, "get_command", get_command)
-    assert cli.main(["call", "prompt"]) == 0
-    assert seen == [(None, None)]
-    assert capsys.readouterr().out == "legacy:prompt\n"
+    monkeypatch.setattr(cli.providers, cls, factory)
+    args = ["call", "prompt", "--provider", name]
+    if model is not None:
+        args.extend(["--model", model])
+    assert cli.main(args) == 0
+    assert seen == [{"model": model}]
+    assert capsys.readouterr().out == "answer:prompt\n"
 
 
-def test_provider_command_shows_default_selection(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "get_default", lambda: ("claude", None))
-    assert cli.main(["provider"]) == 0
-    assert capsys.readouterr().out == "provider=claude model=(provider default)\n"
+def test_provider_is_required(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["call", "prompt"])
+    assert exc.value.code == 2
+    assert "--provider" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("error", [ValueError("bad configuration"), ProviderError("missing SDK")])
@@ -80,7 +84,7 @@ def test_api_failures_are_reported_without_traceback(monkeypatch, capsys, error)
     def factory(**kwargs):
         raise error
 
-    monkeypatch.setattr(cli, "LiteLLMAPI", factory)
+    monkeypatch.setattr(cli.providers, "LiteLLMAPI", factory)
     assert cli.main(["call", "prompt", "--provider", "litellm", "--model", "test"]) == 2
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err == f"{error}\n"
@@ -90,7 +94,7 @@ def test_empty_input_is_rejected_before_constructing_provider(monkeypatch, capsy
     def factory(**kwargs):
         raise AssertionError("provider constructed for empty input")
 
-    monkeypatch.setattr(cli, "LiteLLMAPI", factory)
+    monkeypatch.setattr(cli.providers, "LiteLLMAPI", factory)
     monkeypatch.setattr("sys.stdin", StringIO("  \n"))
     assert cli.main(["call", "--provider", "litellm", "--model", "test"]) == 2
     assert "No prompt" in capsys.readouterr().err

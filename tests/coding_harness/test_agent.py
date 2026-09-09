@@ -154,7 +154,7 @@ def test_serialization_failure_after_effect_is_not_retried(workspace):
         """Write once then return an invalid result."""
         with (workspace.root / "effects.txt").open("a") as stream:
             stream.write("effect\n")
-        return "invalid"
+        return object()
 
     provider = Script(
         turn(calls=[{"id": "write", "name": "broken_return", "arguments": {}}]), turn("Stopped")

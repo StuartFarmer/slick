@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from slick.tools._protocol import make_request
+from slick.tools import make_request
 
 from .state import Check, HarnessConfig
 

@@ -236,7 +236,7 @@ def test_tree_dead_end_stops_without_more_calls():
         ),
     ],
 )
-def test_patterns_accept_fenced_json(module_name, class_name, responses):
+def test_patterns_propagate_invalid_json(module_name, class_name, responses):
     class FencedProvider(FakeProvider):
         async def acall(self, text):
             response, _ = await super().acall(text)
@@ -244,5 +244,5 @@ def test_patterns_accept_fenced_json(module_name, class_name, responses):
 
     module = importlib.import_module(f"examples.{module_name}")
     pattern = getattr(module, class_name)("Task", FencedProvider(responses))
-    result = asyncio.run(pattern.run())
-    assert (result if isinstance(result, str) else result.answer) == "done"
+    with pytest.raises(ValidationError, match="Invalid JSON"):
+        asyncio.run(pattern.run())

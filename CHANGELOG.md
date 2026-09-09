@@ -38,8 +38,9 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Provider implementations now live in `slick.providers`, with descriptive
   `CodexCLI`, `ClaudeCLI`, `OpenAIAPI`, `AnthropicAPI`, and `LiteLLMAPI` classes.
-- Provider selection uses `@prompt(provider=...)`, `--provider`, `SLICK_PROVIDER`,
-  and `slick provider`. The CLI-only factory is `get_command`.
+- Provider selection uses explicit instances in Python and required `--provider`
+  selection in `slick call`. Removed the CLI registry, `get_command`, `get_default`,
+  `set_default`, `SLICK_PROVIDER` / `SLICK_MODEL` fallbacks, and `slick provider`.
 - Removed short class aliases and obsolete compatibility modules; callers must
   use the canonical provider names. Examples and tests follow the same naming.
 - Two prompting examples use string constraints compatible with Pydantic 2.0.

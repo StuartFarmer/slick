@@ -42,3 +42,4 @@ htmlcov/
 .agents/
 .rtk/
 skills-lock.json
+neural-code/

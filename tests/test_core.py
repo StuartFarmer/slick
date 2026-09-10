@@ -29,14 +29,11 @@ class FakeProvider:
         await asyncio.sleep(0)
         return self.call(text)
 
-    def identity(self):
-        return {"provider": "test", "response": self.response}
-
 
 @pytest.fixture
 def root(tmp_path, monkeypatch):
     monkeypatch.setattr(prompts, "TEMPLATE_ROOT", tmp_path)
-    monkeypatch.setattr(prompts, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.chdir(tmp_path)
     return tmp_path
 
 
@@ -115,38 +112,6 @@ def test_invalid_output_is_not_repaired_and_preserves_response(root):
     assert not (root / "logs").exists()
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-def test_explicit_cache_logs_only_accepted_typed_output(root, asynchronous):
-    provider = FakeProvider("invalid")
-
-    def declaration(document: str) -> Summary:
-        """{{ document }}"""
-
-    async def async_declaration(document: str) -> Summary:
-        """{{ document }}"""
-
-    fn = slick.prompt(provider=provider, cache=True, log_dir=root / "chosen")(
-        async_declaration if asynchronous else declaration
-    )
-    with pytest.raises(ValidationError):
-        asyncio.run(fn("x")) if asynchronous else fn("x")
-    assert len(provider.calls) == 1
-    assert [path.name for path in (root / "chosen").glob("*/*")] == ["prompt.md"]
-
-    provider.response = '{"headline":"H", "points":[]}'
-    if asynchronous:
-
-        async def run():
-            return await fn("x"), await fn("x")
-
-        first, second = asyncio.run(run())
-    else:
-        first, second = fn("x"), fn("x")
-    assert first == second == Summary(headline="H", points=[])
-    assert len(provider.calls) == 2
-    assert len(list((root / "chosen").glob("*/response.txt"))) == 1
-
-
 def test_async_functions_render_and_execute_without_hidden_sync_calls(root):
     class AsyncOnly:
         async def acall(self, text):
@@ -219,25 +184,6 @@ def test_provider_selection_is_explicit_and_unsupported_async_fails(root):
         asyncio.run(async_answer("x"))
 
 
-def test_custom_provider_needs_no_identity_unless_persistence_is_enabled(root):
-    class Minimal:
-        def call(self, text):
-            return (text, [])
-
-    @slick.prompt(provider=Minimal())
-    def echo(value: str) -> str:
-        """{{ value }}"""
-
-    assert echo("hello") == "hello"
-
-    @slick.prompt(provider=Minimal(), cache=True)
-    def cached(value: str) -> str:
-        """{{ value }}"""
-
-    with pytest.raises(AttributeError, match="identity"):
-        cached("hello")
-
-
 @pytest.mark.parametrize("asynchronous", [False, True])
 def test_caller_owns_retries_after_parse_failure(root, asynchronous):
     class Scripted(FakeProvider):
@@ -263,11 +209,20 @@ def test_caller_owns_retries_after_parse_failure(root, asynchronous):
     assert not (root / "logs").exists()
 
 
-def test_output_save_remains_explicit(root):
-    @slick.prompt(provider=FakeProvider("answer"))
-    def answer() -> str:
-        """Answer"""
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_output_is_template_data_without_file_writes(tmp_path, monkeypatch, asynchronous):
+    monkeypatch.chdir(tmp_path)
+    provider = FakeProvider("  answer\n")
 
-    assert answer(output=root / "result.txt") == "answer"
-    assert (root / "result.txt").read_text() == "answer"
-    assert not (root / "logs").exists()
+    def declaration(output: str) -> str:
+        """Write {{ output }}"""
+
+    async def async_declaration(output: str) -> str:
+        """Write {{ output }}"""
+
+    fn = slick.prompt(provider=provider)(async_declaration if asynchronous else declaration)
+    for _ in range(2):
+        result = asyncio.run(fn(output="report.md")) if asynchronous else fn(output="report.md")
+        assert result == "  answer\n"
+    assert provider.calls == ["Write report.md", "Write report.md"]
+    assert list(tmp_path.iterdir()) == []

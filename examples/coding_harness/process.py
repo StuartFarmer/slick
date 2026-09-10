@@ -8,7 +8,16 @@ import sys
 import warnings
 from pathlib import Path
 
-from .state import CommandResult
+from pydantic import BaseModel
+
+
+class CommandResult(BaseModel, extra="forbid"):
+    argv: list[str]
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    timed_out: bool
+    truncated: bool
 
 
 class _Output:

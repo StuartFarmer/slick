@@ -1,188 +1,21 @@
-"""Optional Textual job; all effects occur in disposable workspaces."""
+"""Behavioral coverage for the direct console and Textual interfaces."""
 
 import asyncio
-import hashlib
 import json
-import os
-import sys
+from pathlib import Path
 
 import pytest
 
 pytest.importorskip("textual")
 from textual.app import App
-from textual.widgets import Input, ListView, RichLog, Static
+from textual.widgets import Input, RichLog, Static
 
-from examples.coding_harness.tui import DetailModal, plain
-
-
-def test_external_output_is_plain_and_terminal_controls_are_removed():
-    output = plain(
-        "[bold]literal[/bold]\x1b[31m red\x1b[0m \x1b]8;;https://evil.invalid\x07link\x1b]8;;\x07\x1b]52;c;clipboard\x07\x00\r\nend"
-    )
-    assert output.plain == "[bold]literal[/bold] red link\nend"
-    assert not output.spans
-    assert plain("hello\x1b]52;c;unterminated").plain == "hello"
+from examples.coding_harness.tui import ApprovalModal, HarnessApp
+from examples.coding_harness.ui import ConsoleUI, safe_text
 
 
-def test_result_details_show_actual_output_lines_and_truncation():
-    from examples.coding_harness.tui import result_detail
-
-    detail = result_detail(
-        json.dumps(
-            {
-                "argv": ["python", "-m", "unittest"],
-                "exit_code": 1,
-                "timed_out": False,
-                "stdout": "first\nsecond\n",
-                "stderr": "FAILED\n",
-                "truncated": True,
-            }
-        )
-    )
-    assert "first\nsecond\n" in detail
-    assert "FAILED\n" in detail
-    assert '"exit_code": 1' in detail
-    assert '"truncated": true' in detail
-
-
-@pytest.mark.parametrize(
-    "key,expected", [("1", "once"), ("2", "session"), ("3", "deny"), ("escape", "deny")]
-)
-def test_keyboard_command_decision(key, expected):
-    async def scenario():
-        app = App()
-        decisions = []
-        async with app.run_test(size=(80, 24)) as pilot:
-            await app.push_screen(
-                DetailModal("Run command", "argv: ['python']\ncwd: /tmp", decision=True),
-                decisions.append,
-            )
-            await pilot.press(key)
-            await pilot.pause()
-            assert decisions == [expected]
-
-    asyncio.run(scenario())
-
-
-@pytest.fixture
-def harness(tmp_path):
-    from examples.coding_harness.demo import DemoProvider, create_demo
-    from examples.coding_harness.tui import HarnessApp
-
-    root = tmp_path / "demo"
-    root.mkdir()
-    config = create_demo(root)
-    return HarnessApp(DemoProvider(root), root, config)
-
-
-@pytest.mark.parametrize("size", [(80, 24), (120, 40)])
-def test_enter_repairs_real_demo_and_opens_result_and_diff(harness, size):
-    async def scenario():
-        async with harness.run_test(size=size) as pilot:
-            field = harness.query_one("#task", Input)
-            field.value = "Fix the total calculation"
-            await pilot.press("enter")
-            await asyncio.wait_for(harness.workers.wait_for_complete(), 20)
-            await pilot.pause()
-            result = harness.agent.state.last_result
-            assert result.status == "verified"
-            assert result.repairs == 1
-            assert all(check.command.exit_code == 0 for check in result.checks)
-            assert (
-                harness.workspace_root / "pricing.py"
-            ).read_text() == "def total(values):\n    return sum(values)\n"
-            assert not field.disabled
-            results = harness.query_one("#results", ListView)
-            results.focus()
-            await pilot.press("home", "enter")
-            await pilot.pause()
-            assert isinstance(harness.screen, DetailModal)
-            await pilot.press("escape", "ctrl+d")
-            await asyncio.wait_for(harness.workers.wait_for_complete(), 5)
-            await pilot.pause()
-            assert isinstance(harness.screen, DetailModal)
-            assert "pricing.py" in harness.screen.content
-            assert "pre-existing" in harness.screen.content.lower()
-            await pilot.press("escape")
-
-    asyncio.run(scenario())
-
-
-def test_help_new_and_narrow_hint(harness):
-    async def scenario():
-        async with harness.run_test(size=(65, 20)) as pilot:
-            hint = harness.query_one("#resize-hint", Static)
-            assert hint.display
-            task = harness.query_one("#task", Input)
-            task.value = "/help"
-            await pilot.press("enter")
-            await pilot.pause()
-            assert "/save PATH" in "".join(
-                line.text for line in harness.query_one("#transcript", RichLog).lines
-            )
-            source = harness.workspace_root / "pricing.py"
-            before = source.read_bytes()
-            task.value = "/new"
-            await pilot.press("enter")
-            await asyncio.wait_for(harness.workers.wait_for_complete(), 10)
-            assert source.read_bytes() == before
-            assert harness.agent.state.last_result is None
-            assert not task.disabled
-
-    asyncio.run(scenario())
-
-
-def test_detail_modal_preserves_markup_as_literal_and_scrolls():
-    async def scenario():
-        app = App()
-        async with app.run_test(size=(80, 24)) as pilot:
-            await app.push_screen(DetailModal("Output", "[bold]literal[/bold]\n" * 80))
-            await pilot.pause()
-            log = app.screen.query_one(RichLog)
-            assert "[bold]literal[/bold]" in "".join(line.text for line in log.lines)
-            await pilot.press("end", "escape")
-            assert not isinstance(app.screen, DetailModal)
-
-    asyncio.run(scenario())
-
-
-def test_command_decision_does_not_hide_tail_arguments():
-    async def scenario():
-        app = App()
-        async with app.run_test() as pilot:
-            await app.push_screen(
-                DetailModal("Command", "argument " * 2600 + "TAIL_ARGUMENT", decision=True)
-            )
-            await pilot.pause()
-            assert "TAIL_ARGUMENT" in "".join(
-                line.text for line in app.screen.query_one(RichLog).lines
-            )
-            await pilot.press("escape")
-
-    asyncio.run(scenario())
-
-
-class CommandProvider:
-    """Scripted native turns; command execution still uses the real workspace."""
-
-    def __init__(self, commands):
-        self.commands = commands
-        self.calls = 0
-
-    def identity(self):
-        return {"provider": "demo", "model": "command-test"}
-
-    async def acall(self, context, *, tools=None, tool_results=None):
-        self.calls += 1
-        calls = (
-            [
-                {"id": f"command-{index}", "name": "run_command", "arguments": {"argv": argv}}
-                for index, argv in enumerate(self.commands)
-            ]
-            if self.calls == 1
-            else []
-        )
-        return ("Run commands" if calls else "Done", calls)
+def transcript(app):
+    return "\n".join(line.text for line in app.query_one("#transcript", RichLog).lines)
 
 
 async def wait_until(pilot, predicate):
@@ -190,258 +23,311 @@ async def wait_until(pilot, predicate):
         while not predicate():
             await pilot.pause(0.01)
 
-    await asyncio.wait_for(wait(), 10)
+    await asyncio.wait_for(wait(), 5)
 
 
-def command_app(harness, commands):
-    from examples.coding_harness.state import HarnessConfig
-    from examples.coding_harness.tui import HarnessApp
+class FakeWorkspace:
+    def __init__(self, root):
+        self.root = Path(root)
+        self.decide = self._deny
 
-    return HarnessApp(CommandProvider(commands), harness.workspace_root, HarnessConfig())
+    async def _deny(self, request):
+        return "deny"
+
+    async def git_diff(self):
+        return {
+            "staged": "",
+            "unstaged": "diff --git a/example.py b/example.py\n+[bold]literal[/bold]\x1b[31m",
+            "untracked": ["notes.txt"],
+            "truncated": False,
+        }
 
 
-@pytest.mark.parametrize("choice,count", [("1", 1), ("2", 2)])
-def test_decisions_control_real_effects_and_exact_session_scope(harness, choice, count):
-    command = [
-        sys.executable,
-        "-c",
-        "from pathlib import Path; p=Path('allowed.txt'); "
-        "p.write_text(p.read_text()+'x' if p.exists() else 'x')",
+class FakeAgent:
+    def __init__(self, root):
+        self.provider = type(
+            "FakeProvider",
+            (),
+            {"identity": lambda _: {"provider": "demo", "model": "offline"}},
+        )()
+        self.workspace = FakeWorkspace(root)
+        self.config = object()
+        self.messages = [{"role": "assistant", "text": "Restored context"}]
+        self.last_result = None
+        self.running = False
+        self.ui = ConsoleUI(write=lambda text: None)
+        self.compactions = 0
+        self.resets = 0
+        self.started = asyncio.Event()
+        self.cleaned = asyncio.Event()
+
+    async def run(self, task):
+        self.running = True
+        self.ui.user(task)
+        try:
+            if task == "slow":
+                self.started.set()
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    self.last_result = {
+                        "status": "cancelled",
+                        "answer": "Cancelled",
+                        "checks": [],
+                        "turns": 0,
+                        "tool_calls": 0,
+                        "repairs": 0,
+                        "changed_paths": [],
+                    }
+                    self.ui.completed(self.last_result)
+                    raise
+                finally:
+                    await asyncio.sleep(0)
+                    self.cleaned.set()
+                return None
+            if task.startswith("approve "):
+                name = task.removeprefix("approve ")
+                decision = await self.workspace.decide(
+                    {
+                        "argv": ["python", "-c", f"Path({name!r}).touch()"],
+                        "cwd": str(self.workspace.root),
+                        "timeout": 17,
+                    }
+                )
+                if decision in {"once", "session"}:
+                    (self.workspace.root / name).touch()
+            self.ui.tool("read_file", "[bold]literal[/bold]\x1b]52;c;clipboard\x07")
+            self.last_result = {
+                "status": "unverified",
+                "answer": f"Finished {task}",
+                "checks": [],
+                "turns": 1,
+                "tool_calls": 1,
+                "repairs": 0,
+                "changed_paths": [],
+            }
+            self.ui.completed(self.last_result)
+            return self.last_result
+        finally:
+            self.running = False
+
+    async def compact(self):
+        self.compactions += 1
+
+    async def new_conversation(self):
+        self.resets += 1
+        self.messages.clear()
+        self.last_result = None
+
+    def save(self, path):
+        Path(path).write_text(json.dumps({"messages": self.messages}))
+
+
+def test_console_ui_is_safe_readable_and_denies_commands():
+    lines = []
+    ui = ConsoleUI(write=lines.append)
+    ui.user("fix [total]\x1b[31m")
+    ui.assistant("done")
+    ui.status("checking")
+    ui.tool("run_command", "line one\nline two", is_error=True)
+    ui.checks(
+        [
+            {
+                "name": "tests",
+                "command": {"exit_code": 1, "timed_out": False, "truncated": True},
+            }
+        ],
+        baseline=True,
+    )
+    ui.completed(
+        {
+            "status": "blocked",
+            "answer": "needs work",
+            "turns": 2,
+            "tool_calls": 1,
+            "repairs": 1,
+        }
+    )
+
+    assert lines == [
+        "You: fix [total]",
+        "Agent: done",
+        "Status: checking",
+        "Tool error (run_command): line one\nline two",
+        "Baseline tests: exit 1\n[output truncated]",
+        "Blocked · 2 turns · 1 tools · 1 repairs\nneeds work",
     ]
-    denied = [sys.executable, "-c", "from pathlib import Path; Path('denied.txt').touch()"]
-    app = command_app(harness, [command, command, denied])
+    assert (
+        safe_text(
+            "link\x1b]8;;https://evil.invalid\x07text\x1b]8;;\x07"
+            "\x1bXDCS\x1b\\\x90C1 DCS\x9c\x00"
+        )
+        == "linktext"
+    )
+    assert asyncio.run(ui.approve({"argv": ["python"], "cwd": "/tmp", "timeout": 5})) == "deny"
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [("1", "once"), ("2", "session"), ("3", "deny"), ("escape", "deny")],
+)
+def test_approval_modal_returns_keyboard_choice_and_shows_exact_request(key, expected):
+    request = {
+        "argv": ["python", "-c", "print('[literal]')", "TAIL_ARGUMENT"],
+        "cwd": "/tmp/work space",
+        "timeout": 23,
+    }
+
+    async def scenario():
+        app = App()
+        decisions = []
+        async with app.run_test(size=(80, 24)) as pilot:
+            await app.push_screen(ApprovalModal(request), decisions.append)
+            await pilot.pause()
+            screen = app.screen
+            output = "\n".join(line.text for line in screen.query_one(RichLog).lines)
+            assert json.dumps(request["argv"], ensure_ascii=False) in output
+            assert request["cwd"] in output
+            assert "timeout: 23s" in output
+            await pilot.press(key)
+            await pilot.pause()
+        assert decisions == [expected]
+
+    asyncio.run(scenario())
+
+
+def test_mount_wires_direct_ui_and_approval_controls_real_effects(tmp_path):
+    agent = FakeAgent(tmp_path)
+    app = HarnessApp(agent)
 
     async def scenario():
         async with app.run_test(size=(80, 24)) as pilot:
-            app.query_one("#task", Input).value = "Run the commands"
+            assert agent.ui is app
+            assert agent.workspace.decide.__self__ is app
+            assert "Restored context" in transcript(app)
+            field = app.query_one("#task", Input)
+
+            field.value = "approve allowed.txt"
             await pilot.press("enter")
-            await wait_until(pilot, lambda: isinstance(app.screen, DetailModal))
-            assert json.dumps(command) in app.screen.content
-            assert str(harness.workspace_root) in app.screen.content
-            await pilot.press(choice)
-            if choice == "1":
-                await wait_until(pilot, lambda: isinstance(app.screen, DetailModal))
-                await pilot.press("3")
-            await wait_until(pilot, lambda: isinstance(app.screen, DetailModal))
-            assert "denied.txt" in app.screen.content
+            await wait_until(pilot, lambda: isinstance(app.screen, ApprovalModal))
+            assert "allowed.txt" in app.screen.content
+            await pilot.press("1")
+            await wait_until(pilot, lambda: app.operation is None)
+            assert (tmp_path / "allowed.txt").exists()
+
+            field.value = "approve denied.txt"
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: isinstance(app.screen, ApprovalModal))
             await pilot.press("escape")
-            await asyncio.wait_for(app.workers.wait_for_complete(), 10)
-            assert (harness.workspace_root / "allowed.txt").read_text() == "x" * count
-            assert not (harness.workspace_root / "denied.txt").exists()
-            assert not app.query_one("#task", Input).disabled
+            await wait_until(pilot, lambda: app.operation is None)
+            assert not (tmp_path / "denied.txt").exists()
+            output = transcript(app)
+            assert "[bold]literal[/bold]" in output
+            assert "clipboard" not in output
+            assert not field.disabled
 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("quit_app", [False, True])
-def test_cancel_or_quit_reaps_child_and_allows_followup(harness, quit_app):
-    command = [
-        sys.executable,
-        "-c",
-        "import os,time; from pathlib import Path; "
-        "Path('child.pid').write_text(str(os.getpid())); time.sleep(60)",
-    ]
-    app = command_app(harness, [command])
+def test_cancel_waits_for_cleanup_and_allows_followup(tmp_path):
+    agent = FakeAgent(tmp_path)
+    app = HarnessApp(agent)
 
     async def scenario():
-        child_pid = None
-        try:
-            async with app.run_test(size=(80, 24)) as pilot:
-                field = app.query_one("#task", Input)
-                field.value = "Start command"
-                await pilot.press("enter")
-                await wait_until(pilot, lambda: isinstance(app.screen, DetailModal))
-                await pilot.press("1")
-                pidfile = harness.workspace_root / "child.pid"
-                await wait_until(pilot, pidfile.exists)
-                child_pid = int(pidfile.read_text())
-                assert field.disabled
-                app.post_message(Input.Submitted(field, "Overlapping task"))
-                await pilot.pause()
-                assert app.provider.calls == 1
-                if quit_app:
-                    await pilot.press("ctrl+d")
-                    await wait_until(pilot, lambda: isinstance(app.screen, DetailModal))
-                    assert not app.screen.decision
-                await pilot.press("ctrl+q" if quit_app else "escape")
-                await asyncio.wait_for(app.workers.wait_for_complete(), 10)
-                with pytest.raises(ProcessLookupError):
-                    os.kill(child_pid, 0)
-                child_pid = None
-                assert app.agent.state.last_result.status == "cancelled"
-                if not quit_app:
-                    assert not field.disabled
-                    field.value = "Follow up"
-                    await pilot.press("enter")
-                    await asyncio.wait_for(app.workers.wait_for_complete(), 10)
-                    assert app.agent.state.last_result.status == "unverified"
-        finally:
-            if child_pid is not None:
-                try:
-                    os.kill(child_pid, 9)
-                except ProcessLookupError:
-                    pass
+        async with app.run_test() as pilot:
+            field = app.query_one("#task", Input)
+            field.value = "slow"
+            await pilot.press("enter")
+            await wait_until(pilot, agent.started.is_set)
+            await pilot.press("escape")
+            await wait_until(pilot, lambda: app.operation is None)
+            assert agent.cleaned.is_set()
+            assert not field.disabled
+
+            field.value = "follow up"
+            await pilot.press("enter")
+            await wait_until(pilot, lambda: app.operation is None)
+            assert agent.last_result["answer"] == "Finished follow up"
 
     asyncio.run(scenario())
 
 
-def test_save_and_resume_restore_inert_history(harness, tmp_path):
-    from examples.coding_harness.session import load_session
-    from examples.coding_harness.tui import HarnessApp
-
-    path = tmp_path / "saved session.json"
+def test_unmount_cancels_active_task_without_rendering_into_removed_widgets(tmp_path):
+    agent = FakeAgent(tmp_path)
+    app = HarnessApp(agent)
 
     async def scenario():
-        async with harness.run_test() as pilot:
-            field = harness.query_one("#task", Input)
+        async with app.run_test() as pilot:
+            field = app.query_one("#task", Input)
+            field.value = "slow"
+            await pilot.press("enter")
+            await wait_until(pilot, agent.started.is_set)
+        assert agent.cleaned.is_set()
+        assert app.operation is None
+
+    asyncio.run(scenario())
+
+
+def test_commands_and_diff_use_agent_methods(tmp_path):
+    agent = FakeAgent(tmp_path)
+    app = HarnessApp(agent)
+    saved = tmp_path / "saved session.json"
+
+    async def submit(pilot, text):
+        app.query_one("#task", Input).value = text
+        await pilot.press("enter")
+        await wait_until(pilot, lambda: app.operation is None)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            assert "demo / offline" in app.query_one("#heading", Static).render().plain
+            assert str(tmp_path) in app.query_one("#heading", Static).render().plain
+            await submit(pilot, "/help")
+            assert "/save PATH" in transcript(app)
+            await submit(pilot, "/compact")
+            assert app.query_one("#status", Static).render().plain == "Ready"
+            await submit(pilot, f"/save {saved}")
+            assert agent.compactions == 1
+            assert saved.is_file()
+            assert app.query_one("#status", Static).render().plain == "Ready"
+
+            await pilot.press("ctrl+d")
+            await wait_until(pilot, lambda: "notes.txt" in transcript(app))
+            output = transcript(app)
+            assert "diff --git" in output
+            assert "[bold]literal[/bold]" in output
+
+            await submit(pilot, "/new")
+            assert agent.resets == 1
+            assert "New conversation" in transcript(app)
+            assert app.query_one("#status", Static).render().plain == "Ready"
+
+    asyncio.run(scenario())
+
+
+def test_real_offline_demo_repairs_and_verifies_through_tui(tmp_path):
+    from examples.coding_harness.agent import create_agent
+    from examples.coding_harness.demo import FIXED, DemoProvider, create_demo
+
+    root = tmp_path / "demo"
+    root.mkdir()
+    config = create_demo(root)
+
+    async def scenario():
+        agent = await create_agent(DemoProvider(root), root, config)
+        app = HarnessApp(agent)
+        async with app.run_test(size=(80, 24)) as pilot:
+            field = app.query_one("#task", Input)
             field.value = "Fix the total calculation"
             await pilot.press("enter")
-            await asyncio.wait_for(harness.workers.wait_for_complete(), 20)
-            field.value = f"/save {path}"
-            await pilot.press("enter")
-            await asyncio.wait_for(harness.workers.wait_for_complete(), 10)
-            assert path.is_file()
-            history_size = len(harness.agent.session.history)
-        saved = load_session(path)
-        restored = HarnessApp(harness.provider, harness.workspace_root, harness.config, saved=saved)
-        before = (harness.workspace_root / "pricing.py").read_bytes()
-        async with restored.run_test() as pilot:
-            assert len(restored.agent.session.history) == history_size
-            assert restored.agent.state.last_result.status == "verified"
-            assert not restored.query_one("#task", Input).disabled
-            assert (harness.workspace_root / "pricing.py").read_bytes() == before
+            await wait_until(pilot, lambda: app.operation is None)
+            assert agent.last_result["status"] == "verified"
+            assert agent.last_result["repairs"] == 1
+            assert (root / "pricing.py").read_text() == FIXED
+            assert "Verified" in transcript(app)
 
-    asyncio.run(scenario())
-
-
-def test_provider_failure_exposes_reason_and_returns_to_idle(harness):
-    class FailingProvider(CommandProvider):
-        async def acall(self, context, *, tools=None, tool_results=None):
-            raise RuntimeError("Provider unavailable: local test failure")
-
-    app = command_app(harness, [])
-    app.provider = FailingProvider([])
-
-    async def scenario():
-        async with app.run_test() as pilot:
-            field = app.query_one("#task", Input)
-            field.value = "Try the provider"
-            await pilot.press("enter")
-            await asyncio.wait_for(app.workers.wait_for_complete(), 10)
-            await pilot.pause()
-            assert app.agent.state.last_result.status == "failed"
-            assert "Provider unavailable" in "".join(
-                line.text for line in app.query_one("#transcript", RichLog).lines
-            )
-            assert not field.disabled
-
-    asyncio.run(scenario())
-
-
-def test_compact_command_replaces_history_without_changing_files(harness):
-    class SummaryProvider(CommandProvider):
-        async def acall(self, context, *, tools=None, tool_results=None):
-            if not tools:
-                text = json.dumps(
-                    {
-                        "facts": ["No files changed"],
-                        "decisions": [],
-                        "open_questions": [],
-                        "modified_files": [],
-                        "next_steps": [],
-                    }
-                )
-                return (text, [])
-            return await super().acall(context, tools=tools, tool_results=tool_results)
-
-    app = command_app(harness, [])
-    app.provider = SummaryProvider([])
-
-    async def scenario():
-        async with app.run_test() as pilot:
-            field = app.query_one("#task", Input)
-            field.value = "Inspect the task"
-            await pilot.press("enter")
-            await asyncio.wait_for(app.workers.wait_for_complete(), 10)
-            from examples.coding_harness.context import history_views
-
-            history = history_views(app.agent.session, app.agent.state, include_ready=True)
-            before = (app.workspace_root / "pricing.py").read_bytes()
-            field.value = "/compact"
-            await pilot.press("enter")
-            await asyncio.wait_for(app.workers.wait_for_complete(), 10)
-            assert app.agent.state.archived_histories, "".join(
-                line.text for line in app.query_one("#transcript", RichLog).lines
-            )
-            assert app.agent.state.archived_histories[-1] == history
-            assert len(app.agent.state.context_notes) == 1
-            assert (app.workspace_root / "pricing.py").read_bytes() == before
-            assert not field.disabled
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("status", ["verified", "unverified"])
-def test_completion_reports_real_verification_file_edits(harness, status):
-    from examples.coding_harness.state import HarnessConfig
-    from examples.coding_harness.tui import HarnessApp
-
-    source = harness.workspace_root / "pricing.py"
-    source.write_text("def total(values):\n    return sum(values)\n")
-    tests = harness.workspace_root / "test_pricing.py"
-    digest = hashlib.sha256(tests.read_bytes()).hexdigest()
-
-    class EditTestsProvider(CommandProvider):
-        async def acall(self, context, *, tools=None, tool_results=None):
-            self.calls += 1
-            calls = []
-            if self.calls == 1:
-                calls = [
-                    {
-                        "id": "edit-test",
-                        "name": "edit_file",
-                        "arguments": {
-                            "path": "test_pricing.py",
-                            "old": "import unittest",
-                            "new": "import unittest\n# Reviewed by the harness",
-                            "expected_sha256": digest,
-                        },
-                    }
-                ]
-            return ("Reviewed the tests", calls)
-
-    config = harness.config if status == "verified" else HarnessConfig()
-    app = HarnessApp(EditTestsProvider([]), harness.workspace_root, config)
-
-    async def scenario():
-        async with app.run_test() as pilot:
-            app.query_one("#task", Input).value = "Review the verification file"
-            await pilot.press("enter")
-            await asyncio.wait_for(app.workers.wait_for_complete(), 10)
-            await pilot.pause()
-            assert "# Reviewed by the harness" in tests.read_text()
-            assert app.agent.state.last_result.status == status
-            output = "".join(line.text for line in app.query_one("#transcript", RichLog).lines)
-            assert "Verification-related files changed: test_pricing.py" in output
-
-    asyncio.run(scenario())
-
-
-def test_failed_startup_quits_with_nonzero_result(tmp_path):
-    from examples.coding_harness.state import HarnessConfig
-    from examples.coding_harness.tui import HarnessApp
-
-    invalid = tmp_path / "workspace-file"
-    invalid.write_text("not a directory")
-    app = HarnessApp(CommandProvider([]), invalid, HarnessConfig())
-
-    async def scenario():
-        async with app.run_test() as pilot:
-            assert app.agent is None
-            assert app.query_one("#task", Input).disabled
-            output = "".join(line.text for line in app.query_one("#transcript", RichLog).lines)
-            assert "Failed to initialize" in output
-            await pilot.press("ctrl+q")
-        assert app.return_value == 1
+            await pilot.press("ctrl+d")
+            await wait_until(pilot, lambda: "diff --git" in transcript(app))
+            assert "pricing.py" in transcript(app)
 
     asyncio.run(scenario())

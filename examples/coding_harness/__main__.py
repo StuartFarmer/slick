@@ -10,32 +10,10 @@ from tempfile import TemporaryDirectory
 
 from slick import prompts, providers
 
-from .agent import CodingAgent
+from .agent import create_agent
+from .config import load_config
 from .demo import DemoProvider, create_demo
-from .session import load_session, restore_session
-from .state import load_config
-from .workspace import Workspace
-
-
-async def deny(request):
-    return "deny"
-
-
-async def create_agent(provider_instance, root, config, *, decide, emit, saved=None):
-    if saved is not None:
-        if Path(root).resolve() != Path(saved.root) or config != saved.config:
-            raise ValueError("Resume configuration does not match saved session")
-        return await restore_session(saved, provider_instance, decide=decide, emit=emit)
-    workspace = Workspace(
-        Path(root),
-        checks=config.checks,
-        decide=decide,
-        command_timeout=config.limits.command_timeout,
-    )
-    await workspace.initialize(create=True)
-    agent = CodingAgent(provider_instance, workspace, config, emit=emit)
-    agent.state.fingerprint = await workspace.fingerprint()
-    return agent
+from .session import load
 
 
 def build_parser():
@@ -62,31 +40,11 @@ def build_parser():
     return parser
 
 
-def print_event(event):
-    data = event.data
-    if event.kind in {"user", "assistant", "status"}:
-        print(f"{event.kind.capitalize()}: {data['text']}")
-    elif event.kind == "tool_finished":
-        print(f"{'Error' if data['is_error'] else 'Done'}: {data['name']}")
-    elif event.kind == "verification":
-        for result in data["results"]:
-            print(f"Check {result['name']}: exit {result['command']['exit_code']}")
-    elif event.kind == "completed":
-        result = data["result"]
-        print(
-            f"{result['status'].capitalize()} · {result['turns']} model turns · "
-            f"{result['tool_calls']} tools · {result['repairs']} repairs"
-        )
-        print(result["answer"])
-
-
 async def _headless(provider_instance, root, config, task, saved):
-    agent = await create_agent(
-        provider_instance, root, config, decide=deny, emit=print_event, saved=saved
-    )
+    agent = await create_agent(provider_instance, root, config, saved=saved)
     result = await agent.run(task)
     return {"verified": 0, "unverified": 2, "blocked": 2, "failed": 1, "cancelled": 130}[
-        result.status
+        result["status"]
     ]
 
 
@@ -99,10 +57,7 @@ def _validate_args(parser, args):
         parser.error("--task requires --headless; use the input box interactively")
     if args.resume:
         if any([args.dry_run, args.workspace, args.config]):
-            parser.error(
-                "--resume cannot be combined with --dry-run or "
-                "workspace/config overrides"
-            )
+            parser.error("--resume cannot be combined with --dry-run or workspace/config overrides")
         return
     args.provider = "demo" if args.dry_run else (args.provider or "openai")
     if args.dry_run:
@@ -118,7 +73,7 @@ def main(argv=None):
     _validate_args(parser, args)
     prompts.TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "prompts"
     try:
-        saved = load_session(args.resume) if args.resume else None
+        saved = load(args.resume) if args.resume else None
         provider = (args.provider or saved.provider) if saved else args.provider
         if saved and provider != saved.provider and not args.model:
             parser.error("Changing the resumed provider requires --model")
@@ -153,7 +108,8 @@ def main(argv=None):
                     "Install the TUI with: python -m pip install -r "
                     "examples/coding_harness/requirements.txt"
                 ) from error
-            return HarnessApp(provider_instance, root, config, saved=saved).run() or 0
+            agent = asyncio.run(create_agent(provider_instance, root, config, saved=saved))
+            return HarnessApp(agent).run() or 0
     except (KeyboardInterrupt, asyncio.CancelledError):
         return 130
     except Exception as error:

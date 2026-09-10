@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from typing import Annotated
 
-from pydantic import AfterValidator, ConfigDict, Field, TypeAdapter
+from pydantic import AfterValidator, ConfigDict, TypeAdapter
 from typing_extensions import TypedDict
 
 from .tools import Tool, ToolError, ToolRequest, ToolResult, prepare_tools
@@ -12,57 +12,44 @@ from .tools import Tool, ToolError, ToolRequest, ToolResult, prepare_tools
 SNAPSHOT_CONFIG = ConfigDict(strict=True, extra="forbid", hide_input_in_errors=True)
 
 
-class _WorkFields(TypedDict):
+class _Work(TypedDict):
     __pydantic_config__ = SNAPSHOT_CONFIG
     request: ToolRequest
     result: ToolResult | None
     submitted: bool
 
 
-def _valid_work(work):
-    result = work["result"]
-    if result is None:
-        if work["submitted"]:
-            raise ValueError("Submitted work requires a result")
-    elif result["request"] != work["request"]:
-        raise ValueError("Tool result does not match its request")
-    return work
-
-
-_Work = Annotated[_WorkFields, AfterValidator(_valid_work)]
-
-
-class _ExchangeFields(TypedDict):
+class _Exchange(TypedDict):
     __pydantic_config__ = SNAPSHOT_CONFIG
     context: str | None
     text: str
     work: list[_Work]
 
 
-def _unique_work(exchange):
-    ids = [item["request"]["id"] for item in exchange["work"]]
-    if len(ids) != len(set(ids)):
-        raise ValueError("Duplicate tool request IDs in snapshot")
-    return exchange
-
-
-_Exchange = Annotated[_ExchangeFields, AfterValidator(_unique_work)]
-
-
 class _SnapshotFields(TypedDict):
     __pydantic_config__ = SNAPSHOT_CONFIG
-    version: Annotated[int, Field(ge=1, le=1)]
     history: list[_Exchange]
 
 
-def _valid_history(snapshot):
-    for exchange in snapshot["history"][:-1]:
-        if any(not item["submitted"] for item in exchange["work"]):
-            raise ValueError("Only the current exchange can contain unsubmitted work")
+def _valid_snapshot(snapshot):
+    history = snapshot["history"]
+    for index, exchange in enumerate(history):
+        ids = [work["request"]["id"] for work in exchange["work"]]
+        if len(ids) != len(set(ids)):
+            raise ValueError(f"history[{index}]: Duplicate tool request IDs in snapshot")
+        for work_index, work in enumerate(exchange["work"]):
+            location = f"history[{index}].work[{work_index}]"
+            result = work["result"]
+            if result is None and work["submitted"]:
+                raise ValueError(f"{location}: Submitted work requires a result")
+            if result is not None and result["request"] != work["request"]:
+                raise ValueError(f"{location}: Tool result does not match its request")
+            if index < len(history) - 1 and not work["submitted"]:
+                raise ValueError(f"{location}: Historical work must be submitted")
     return snapshot
 
 
-SessionSnapshot = Annotated[_SnapshotFields, AfterValidator(_valid_history)]
+SessionSnapshot = Annotated[_SnapshotFields, AfterValidator(_valid_snapshot)]
 
 
 _snapshot = TypeAdapter(SessionSnapshot)
@@ -148,7 +135,7 @@ class Session:
             selected = self._provider if provider is None else provider
             if selected is None:
                 raise ValueError("Supply a provider to Session or acall")
-            if self.pending_requests:
+            if any(work["result"] is None for work in self._work):
                 raise ValueError("Resolve or cancel pending requests before calling a provider")
             results = self.ready_results
             text, requests = await selected.acall(context, tools=self.tools, tool_results=results)
@@ -169,12 +156,6 @@ class Session:
             )
             return text, deepcopy(requests)
 
-    def _find_work(self, request):
-        for work in self._work:
-            if work["request"] == request:
-                return work
-        raise ValueError("Request does not match work in the current exchange")
-
     async def _resolve(self, work):
         if work["result"] is None:
             try:
@@ -191,7 +172,10 @@ class Session:
     async def resolve(self, request: ToolRequest | dict) -> ToolResult:
         """Execute current work once, or return its already recorded result."""
         with self._operation():
-            return await self._resolve(self._find_work(request))
+            for work in self._work:
+                if work["request"] == request:
+                    return await self._resolve(work)
+            raise ValueError("Request does not match work in the current exchange")
 
     async def resolve_pending(self) -> list[ToolResult]:
         """Execute unstarted requests sequentially; ordinary tool errors are results.
@@ -200,8 +184,7 @@ class Session:
         requests stay pending for the application to resolve or cancel.
         """
         with self._operation():
-            pending = [work for work in self._work if work["result"] is None]
-            return [await self._resolve(work) for work in pending]
+            return [await self._resolve(work) for work in self._work if work["result"] is None]
 
     def cancel_pending(self, reason: str) -> list[ToolResult]:
         """Record unstarted work as stopped, without executing any function."""
@@ -218,7 +201,7 @@ class Session:
     def to_dict(self) -> dict:
         """Return an idle, JSON-compatible snapshot; no clients or functions."""
         with self._operation():
-            return {"version": 1, "history": self.history}
+            return {"history": self.history}
 
     @classmethod
     def from_dict(cls, data: dict, *, provider=None, tools=None) -> "Session":

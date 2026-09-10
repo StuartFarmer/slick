@@ -1,4 +1,4 @@
-"""Prompt-as-function tests: templates, rendering, returns, cache."""
+"""Prompt-as-function tests: templates, rendering, and returns."""
 
 import tempfile
 import unittest
@@ -20,31 +20,13 @@ class Verdict(BaseModel):
 class StubProvider:
     """Hands back canned responses in order, repeating the last one."""
 
-    provider = "stub"
-    model = None
-
     def __init__(self, *responses: str) -> None:
         self.responses = list(responses) or [""]
         self.prompts: list[str] = []
 
-    def identity(self):
-        return {"provider": self.provider, "model": self.model}
-
     def call(self, prompt_text: str):
         self.prompts.append(prompt_text)
         return (self.responses[min(len(self.prompts), len(self.responses)) - 1], [])
-
-
-class Logged(unittest.TestCase):
-    """Base for tests that let a prompt reach a model."""
-
-    def setUp(self) -> None:
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = Path(tmp.name)
-
-    def runs(self) -> list[Path]:
-        return sorted(self.tmp.iterdir())
 
 
 class Rooted(unittest.TestCase):
@@ -77,8 +59,6 @@ class TemplateFiles(Rooted):
         self.assertIn("Summarize for an engineer.", rendered)
         self.assertIn("DOCBODY", rendered)
         self.assertNotIn("Summarize a document for one audience.", rendered)
-        self.assertEqual(summarize.template_name, "summarize.md.j2")
-        self.assertIn("{{ document }}", summarize.source())
 
     def test_a_template_file_needs_no_docstring(self):
         self.write("bare.md.j2", "{{ document }}")
@@ -128,11 +108,10 @@ class TemplateFiles(Rooted):
         def missing(document: str) -> str:
             """Summarize a document."""
 
-        for attempt in (lambda: missing.render("DOCBODY"), missing.source):
-            with self.assertRaises(TemplateNotFound) as caught:
-                attempt()
-            self.assertIn("gone.md.j2", str(caught.exception))
-            self.assertIn(str(self.root), str(caught.exception))
+        with self.assertRaises(TemplateNotFound) as caught:
+            missing.render("DOCBODY")
+        self.assertIn("gone.md.j2", str(caught.exception))
+        self.assertIn(str(self.root), str(caught.exception))
 
     def test_the_schema_is_appended_to_a_file_that_omits_it(self):
         self.write("judge.md.j2", "Judge {{ document }}")
@@ -180,14 +159,6 @@ class Render(unittest.TestCase):
         annotated = summarize.render("DOCBODY", notes="keep it to three lines")
         self.assertIn("keep it to three lines", annotated)
         self.assertLess(annotated.index("# Notes"), annotated.index("DOCBODY"))
-
-    def test_a_docstring_template_has_no_template_name(self):
-        @prompt
-        def summarize(document: str) -> str:
-            """{{ document }}"""
-
-        self.assertIsNone(summarize.template_name)
-        self.assertEqual(summarize.source(), "{{ document }}")
 
     def test_an_unknown_variable_fails_instead_of_rendering_blank(self):
         @prompt
@@ -240,74 +211,9 @@ class Decoration(unittest.TestCase):
             blank.render("text")
 
 
-class TextReturns(Logged):
-    def test_returns_the_response_and_logs_the_exchange(self):
-        model = StubProvider("# Summary\n")
-
-        @prompt(provider=model, log_dir=self.tmp)
-        def summarize(document: str) -> str:
-            """{{ document }}"""
-
-        self.assertEqual(summarize("DOCBODY"), "# Summary\n")
-        (run,) = self.runs()
-        self.assertEqual((run / "prompt.md").read_text(), "DOCBODY")
-        self.assertEqual((run / "response.txt").read_text(), "# Summary\n")
-
-    def test_output_also_saves_the_text(self):
-        @prompt(provider=StubProvider("# Summary\n"), log_dir=self.tmp)
-        def summarize(document: str) -> str:
-            """{{ document }}"""
-
-        report = self.tmp / "out" / "summary.md"
-        summarize("DOCBODY", output=report)
-        self.assertEqual(report.read_text(), "# Summary\n")
-
-    def test_output_saves_the_response_as_supplied(self):
-        @prompt(provider=StubProvider("  \n"), log_dir=self.tmp)
-        def summarize(document: str) -> str:
-            """{{ document }}"""
-
-        report = self.tmp / "summary.md"
-        self.assertEqual(summarize("DOCBODY", output=report), "  \n")
-        self.assertEqual(report.read_text(), "  \n")
-
-    def test_an_identical_prompt_is_served_from_the_cache(self):
-        model = StubProvider("# Summary\n")
-
-        @prompt(provider=model, log_dir=self.tmp, cache=True)
-        def summarize(document: str) -> str:
-            """{{ document }}"""
-
-        self.assertEqual(summarize("DOCBODY"), summarize("DOCBODY"))
-        self.assertEqual(len(model.prompts), 1)
-
-    def test_a_changed_prompt_is_a_different_call(self):
-        model = StubProvider("# Summary\n")
-
-        @prompt(provider=model, log_dir=self.tmp, cache=True)
-        def summarize(document: str) -> str:
-            """{{ document }}"""
-
-        summarize("DOCBODY")
-        summarize("OTHERBODY")
-        self.assertEqual(len(model.prompts), 2)
-        self.assertEqual(len(self.runs()), 2)
-
-    def test_cache_off_calls_every_time(self):
-        model = StubProvider("# Summary\n")
-
-        @prompt(provider=model, log_dir=self.tmp, cache=False)
-        def summarize(document: str) -> str:
-            """{{ document }}"""
-
-        summarize("DOCBODY")
-        summarize("DOCBODY")
-        self.assertEqual(len(model.prompts), 2)
-
-
-class TypedReturns(Logged):
+class TypedReturns(unittest.TestCase):
     def test_the_schema_is_appended_when_the_template_never_asks(self):
-        @prompt(provider=StubProvider(), log_dir=self.tmp)
+        @prompt(provider=StubProvider())
         def judge(document: str) -> Verdict:
             """{{ document }}"""
 
@@ -317,7 +223,7 @@ class TypedReturns(Logged):
         self.assertLess(rendered.index("DOCBODY"), rendered.index("# Output Format"))
 
     def test_the_schema_lands_where_the_template_puts_it(self):
-        @prompt(provider=StubProvider(), log_dir=self.tmp)
+        @prompt(provider=StubProvider())
         def judge(document: str) -> Verdict:
             """
             {{ output_format }}
@@ -331,7 +237,7 @@ class TypedReturns(Logged):
         self.assertLess(rendered.index("# Output Format"), rendered.index("DOCBODY"))
 
     def test_a_text_return_gets_no_schema(self):
-        @prompt(provider=StubProvider(), log_dir=self.tmp)
+        @prompt(provider=StubProvider())
         def summarize(document: str) -> str:
             """{{ document }}{{ output_format }}"""
 
@@ -340,7 +246,7 @@ class TypedReturns(Logged):
     def test_a_json_response_is_validated(self):
         model = StubProvider('{"approved": true, "reasons": []}')
 
-        @prompt(provider=model, log_dir=self.tmp)
+        @prompt(provider=model)
         def judge(document: str) -> Verdict:
             """{{ document }}"""
 
@@ -351,7 +257,7 @@ class TypedReturns(Logged):
     def test_prose_around_the_json_is_rejected(self):
         model = StubProvider('Sure! {"approved": false, "reasons": ["no data"]} Hope that helps.')
 
-        @prompt(provider=model, log_dir=self.tmp)
+        @prompt(provider=model)
         def judge(document: str) -> Verdict:
             """{{ document }}"""
 
@@ -360,32 +266,11 @@ class TypedReturns(Logged):
         self.assertEqual(len(model.prompts), 1)
 
     def test_a_json_scalar_answer_is_parsed(self):
-        @prompt(provider=StubProvider('"approve"'), log_dir=self.tmp)
+        @prompt(provider=StubProvider('"approve"'))
         def decide(document: str) -> Literal["approve", "reject"]:
             """{{ document }}"""
 
         self.assertEqual(decide("DOCBODY"), "approve")
-
-    def test_output_saves_accepted_json_for_a_structured_return(self):
-        response = '{"approved": true, "reasons": []}'
-
-        @prompt(provider=StubProvider(response), log_dir=self.tmp)
-        def judge(document: str) -> Verdict:
-            """{{ document }}"""
-
-        output = self.tmp / "verdict.json"
-        self.assertTrue(judge("DOCBODY", output=output).approved)
-        self.assertEqual(output.read_text(), response)
-
-    def test_a_cached_structured_response_is_parsed_without_a_call(self):
-        model = StubProvider('{"approved": true, "reasons": []}')
-
-        @prompt(provider=model, log_dir=self.tmp, cache=True)
-        def judge(document: str) -> Verdict:
-            """{{ document }}"""
-
-        self.assertEqual(judge("DOCBODY"), judge("DOCBODY"))
-        self.assertEqual(len(model.prompts), 1)
 
 
 if __name__ == "__main__":

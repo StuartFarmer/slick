@@ -38,7 +38,7 @@ def test_session_example_rejects_command_providers(provider):
 def test_summary_history_and_retrieval_examples(monkeypatch, tmp_path):
     example = importlib.import_module("examples.core")
     monkeypatch.setattr(prompts, "TEMPLATE_ROOT", Path(example.__file__).with_name("prompts"))
-    monkeypatch.setattr(prompts, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.chdir(tmp_path)
 
     class FakeProvider:
         def __init__(self):

@@ -28,14 +28,20 @@ All notable changes to this project will be documented in this file.
   history with separate answer and critique templates.
 - Public `render(template, **variables)` and `parse(text, returns=str)` functions,
   shared with the prompt decorator.
-- `@prompt(provider=...)` and native async decorated calls/rendering; modern calls
-  default to no logging, cache or automatic repair. Legacy sync defaults remain.
+- `@prompt(provider=...)` and native async decorated calls/rendering, with
+  application-owned persistence and retries.
 - Optional OpenAI Responses and Anthropic Messages adapters with sync/async calls,
   explicit limits/retries, lazy SDK loading and owned/injected client lifecycle.
 - Native async CLI `acall`/`aexecute` with timeout/cancellation process cleanup.
 - Offline examples for summaries, templated conversation history and retrieval.
 
 ### Changed
+- Redesigned the coding harness around one conversation list, direct provider/tool calls,
+  bound workspace methods, and named UI methods. Version-2 saves contain conversation
+  data, never an execution queue; earlier harness snapshots are rejected explicitly.
+- Coding harness state no longer duplicates provider identity, workspace metadata,
+  or the edit ledger. Saving uses the active provider, and command dialogs use
+  Textual's built-in result waiting.
 - Provider implementations now live in `slick.providers`, with descriptive
   `CodexCLI`, `ClaudeCLI`, `OpenAIAPI`, `AnthropicAPI`, and `LiteLLMAPI` classes.
 - Provider selection uses explicit instances in Python and required `--provider`
@@ -46,6 +52,12 @@ All notable changes to this project will be documented in this file.
 - Two prompting examples use string constraints compatible with Pydantic 2.0.
 - Prompt validation errors expose the rejected text in `.response`.
 - API SDKs are optional extras; the core still depends only on Jinja2 and Pydantic.
+
+### Removed
+- Prompt persistence: `cache=`, `log_dir=`, and `LOG_DIR`. Applications own caching,
+  logging, and file output; `output` is now an ordinary template argument.
+- Decorator inspection attributes `.source()`, `.template_name`, and `.returns`.
+  `.render()` and the wrapped function's annotations and docstring remain available.
 
 ## [0.2.0]
 

@@ -1,9 +1,9 @@
-{{ instructions }}
+{% include "coding_harness/system.j2" %}
 
 {% for item in history %}
 {{ item.role }}:
 {{ item.text }}
-{% if item.calls is defined and item.calls %}
+{% if item.get("calls") %}
 Tool requests: {{ item.calls | tojson }}
 {% endif %}
 {% if item.role == "tool" %}

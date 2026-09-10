@@ -20,7 +20,7 @@ def test_structured_parsing_requires_json(text):
 def test_model_is_template_data_and_calls_have_no_implicit_side_effects(
     tmp_path, monkeypatch, asynchronous
 ):
-    monkeypatch.setattr(prompts, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.chdir(tmp_path)
 
     class Provider:
         calls = 0
@@ -46,7 +46,10 @@ def test_model_is_template_data_and_calls_have_no_implicit_side_effects(
     assert not (tmp_path / "logs").exists()
 
 
-@pytest.mark.parametrize("option, value", [("model", "codex"), ("max_repairs", 1)])
+@pytest.mark.parametrize(
+    "option, value",
+    [("model", "codex"), ("max_repairs", 1), ("cache", True), ("log_dir", "logs")],
+)
 def test_removed_decorator_options(option, value):
     with pytest.raises(TypeError, match=option):
         prompt(**{option: value})

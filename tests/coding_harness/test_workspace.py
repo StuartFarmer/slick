@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from examples.coding_harness.state import Check
+from examples.coding_harness.checks import Check
 from examples.coding_harness.workspace import Workspace
 from slick import ToolError, tool
 from slick.tools import prepare_tools
@@ -46,11 +46,11 @@ def test_stale_edit_does_not_overwrite_external_changes(workspace):
                 "path": "sample.py",
                 "old": "value = 1",
                 "new": "value = 3",
-                "expected_sha256": original.sha256,
+                "expected_sha256": original["sha256"],
             }
         )
     assert target.read_text() == "value = 2\n"
-    assert not workspace.edit_ledger
+    assert not workspace.edited_paths
 
 
 def test_edit_preserves_bytes_and_permissions(workspace):
@@ -58,11 +58,10 @@ def test_edit_preserves_bytes_and_permissions(workspace):
     path.write_bytes(b"value = 1\r\n")
     path.chmod(0o751)
     original = workspace.read_file("sample.py")
-    result = workspace.edit_file("sample.py", "1", "2", original.sha256)
+    result = workspace.edit_file("sample.py", "1", "2", original["sha256"])
     assert path.read_bytes() == b"value = 2\r\n"
     assert stat.S_IMODE(path.stat().st_mode) == 0o751
-    assert "+value = 2" in result.diff
-    assert workspace.edit_ledger[0]["before_sha256"] == original.sha256
+    assert "+value = 2" in result["diff"]
     assert asyncio.run(workspace.changed_paths()) == ["sample.py"]
 
 
@@ -80,7 +79,7 @@ def test_symlinks_and_nonregular_files(workspace):
     for path in ["link", "directory"]:
         with pytest.raises(ValueError):
             workspace.read_file(path)
-    assert "link" not in asyncio.run(workspace.list_files()).paths
+    assert "link" not in asyncio.run(workspace.list_files())["paths"]
 
 
 def test_invalid_text_and_read_bounds(workspace):
@@ -93,14 +92,14 @@ def test_invalid_text_and_read_bounds(workspace):
             workspace.read_file("sample.py", start, maximum)
     (workspace.root / "data").write_text("x" * 30000)
     result = workspace.read_file("data")
-    assert len(result.text) == 20000 and result.truncated
+    assert len(result["text"]) == 20000 and result["truncated"]
 
 
 def test_ambiguous_and_empty_replacement(workspace):
     original = workspace.read_file("sample.py")
     for old in ["", " ", "missing"]:
         with pytest.raises(ValueError):
-            workspace.edit_file("sample.py", old, "replacement", original.sha256)
+            workspace.edit_file("sample.py", old, "replacement", original["sha256"])
 
 
 def test_exclusive_create_and_existing_parent(workspace):
@@ -119,16 +118,16 @@ def test_catalog_search_and_diff(workspace):
     (workspace.root / "ignored" / "secret").write_text("café")
     (workspace.root / "new.txt").write_text("café\n")
     files = asyncio.run(workspace.list_files("*.txt"))
-    assert files.paths == ["new.txt", "unicode.txt"]
+    assert files["paths"] == ["new.txt", "unicode.txt"]
     hits = asyncio.run(workspace.search("café"))
-    assert {hit.path for hit in hits.hits} == {"unicode.txt", "new.txt"}
-    assert asyncio.run(workspace.search("no_such_text")).hits == []
+    assert {hit["path"] for hit in hits["hits"]} == {"unicode.txt", "new.txt"}
+    assert asyncio.run(workspace.search("no_such_text"))["hits"] == []
     (workspace.root / "sample.py").write_text("value = 2\n")
     subprocess.run(["git", "-C", str(workspace.root), "add", "sample.py"], check=True)
     (workspace.root / "sample.py").write_text("value = 3\n")
     diff = asyncio.run(workspace.git_diff())
-    assert "+value = 2" in diff.staged and "+value = 3" in diff.unstaged
-    assert diff.untracked == ["new.txt"]
+    assert "+value = 2" in diff["staged"] and "+value = 3" in diff["unstaged"]
+    assert diff["untracked"] == ["new.txt"]
 
 
 def test_fingerprint_detects_same_mtime_and_missing_tracked(workspace):
@@ -163,7 +162,7 @@ def test_decisions_exact_argv_and_configured_checks(repo):
 
     asyncio.run(scenario())
     assert len(requests) == 3
-    assert requests[0].cwd == str(repo.resolve()) and requests[0].timeout == 5
+    assert requests[0] == {"argv": approved, "cwd": str(repo.resolve()), "timeout": 5}
 
 
 def test_cancel_decision_has_no_effect(workspace):
@@ -192,8 +191,8 @@ def test_catalog_and_search_truncate(workspace):
         (workspace.root / f"file{index:03}.txt").write_text("match me\n")
     listed = asyncio.run(workspace.list_files("file*"))
     searched = asyncio.run(workspace.search("match me"))
-    assert len(listed.paths) == 200 and listed.truncated
-    assert len(searched.hits) == 200 and searched.truncated
+    assert len(listed["paths"]) == 200 and listed["truncated"]
+    assert len(searched["hits"]) == 200 and searched["truncated"]
 
 
 def test_permissions_do_not_get_bypassed_by_replace(workspace):
@@ -202,7 +201,7 @@ def test_permissions_do_not_get_bypassed_by_replace(workspace):
     path.chmod(0o444)
     try:
         with pytest.raises(PermissionError):
-            workspace.edit_file("sample.py", "1", "2", before.sha256)
+            workspace.edit_file("sample.py", "1", "2", before["sha256"])
         assert path.read_text() == "value = 1\n"
         assert not list(workspace.root.glob(".coding-harness-*"))
     finally:
@@ -217,7 +216,6 @@ def test_unborn_repo_and_subdirectory_selection(tmp_path):
 
     ws = Workspace(tmp_path, checks=[], decide=deny)
     asyncio.run(ws.initialize())
-    assert ws.head is None
     subdir = tmp_path / "subdir"
     subdir.mkdir()
     with pytest.raises(ValueError, match="root"):
@@ -261,7 +259,7 @@ def test_session_approval_is_not_shared_between_workspaces(workspace, tmp_path):
     count = []
 
     async def decide(request):
-        count.append(request.cwd)
+        count.append(request["cwd"])
         return "session" if len(count) == 1 else "deny"
 
     workspace.decide = decide
@@ -290,5 +288,5 @@ def test_overlapping_matches_are_ambiguous(workspace):
     path.write_text("aaa")
     original = workspace.read_file("sample.py")
     with pytest.raises(ValueError, match="exactly once"):
-        workspace.edit_file("sample.py", "aa", "b", original.sha256)
+        workspace.edit_file("sample.py", "aa", "b", original["sha256"])
     assert path.read_text() == "aaa"

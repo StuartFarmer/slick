@@ -1,42 +1,36 @@
-"""A coding harness expressed as ordinary Python state and a bounded loop."""
+"""The coding loop: ask the model, run its tools, check the work, repeat."""
 
 import asyncio
 import json
-from dataclasses import replace
 from pathlib import Path
 
-from slick import Prompt, Session, parse
+from slick import Prompt
 from slick.providers import ProviderError
+from slick.tools import ToolError, prepare_tools
 
-from .context import (
-    context_size,
-    history_views,
-    render_context,
-    render_instructions,
-    summary_prompt,
-)
-from .state import ContextSummary, HarnessEvent, RunResult, SessionState
-from .verification import render_verification, verify
+from . import session
+from .checks import feedback, run_checks, verification_paths
+from .ui import ConsoleUI
+from .workspace import Workspace
 
-
-class RunStopped(RuntimeError):
-    """A configured budget or lack of progress ended this task."""
+SKILLS = {"python": "coding_harness/skills/python.j2"}
 
 
 class CodingAgent:
-    def __init__(self, provider, workspace, config, *, emit=lambda event: None):
-        self.provider, self.workspace, self.config = provider, workspace, config
-        self.emit = emit
-        identity = provider.identity()
-        self.state = SessionState(
-            provider=identity["provider"],
-            model=identity["model"],
-            root=str(workspace.root),
-            head=workspace.head,
-        )
-        self.session = Session(
-            provider=provider,
-            tools=[
+    def __init__(self, provider, workspace, config, *, ui=None):
+        unknown = set(config.skills) - SKILLS.keys()
+        if unknown:
+            raise ValueError(f"Unknown skills: {', '.join(sorted(unknown))}")
+        self.provider = provider
+        self.workspace = workspace
+        self.config = config
+        self.ui = ui or ConsoleUI()
+        self.messages = []
+        self.running = False
+        self.last_result = None
+        self.fingerprint = ""
+        self.tools = prepare_tools(
+            [
                 workspace.list_files,
                 workspace.search,
                 workspace.read_file,
@@ -44,255 +38,236 @@ class CodingAgent:
                 workspace.create_file,
                 workspace.run_command,
                 workspace.git_diff,
-            ],
-        )
-        self._compacted_last = False
-        render_instructions(workspace, config)
-
-    def _note(self, text):
-        self.state.context_notes.append(
-            {"after": len(self.session.history), "role": "user", "text": text}
+            ]
         )
 
-    def _event(self, kind, **data):
-        self.emit(HarnessEvent(kind, data))
-
-    def _result(self, status, answer, checks=(), changed_paths=None):
-        paths = (
-            changed_paths
-            if changed_paths is not None
-            else sorted({entry["path"] for entry in self.workspace.edit_ledger})
-        )
-        verification_files = [
-            path
-            for path in paths
-            if any(part in {"tests", "test", ".github"} for part in Path(path).parts)
-            or Path(path).name.startswith(("test_", "conftest"))
-            or Path(path).name in {"pyproject.toml", "pytest.ini", "tox.ini", "Makefile"}
-            or any(
-                self.workspace.root / path == self.workspace.root / argument
-                for check in self.config.checks
-                for argument in check.argv
-            )
-        ]
-        if verification_files:
-            answer += "\nVerification-related files changed: " + ", ".join(verification_files)
-        return RunResult(
-            status=status,
-            answer=answer,
-            checks=list(checks),
-            turns=self.state.turns,
-            tool_calls=self.state.tool_calls,
-            repairs=self.state.repairs,
-            changed_paths=paths,
-        )
-
-    def _request_budget(self):
-        if self.state.turns >= self.config.limits.max_turns:
-            raise RunStopped("Model request budget exhausted")
-        self.state.turns += 1
-
-    async def run(self, task: str) -> RunResult:
-        if self.state.running:
+    async def run(self, task):
+        if self.running:
             raise RuntimeError("A run is already active")
         if not task.strip():
             raise ValueError("Task must not be empty")
-        self.state.running = True
-        self.state.task = task
-        self.state.turns = self.state.tool_calls = self.state.repairs = 0
-        self.state.last_result = None
-        self._compacted_last = False
+        self.running = True
+        usage = {"turns": 0, "tool_calls": 0, "repairs": 0}
+        self.last_result = None
         try:
-            self.state.last_result = await asyncio.wait_for(
-                self._run(task),
-                timeout=self.config.limits.task_timeout,
+            self.last_result = await asyncio.wait_for(
+                self._run(task, usage), self.config.limits.task_timeout
             )
         except asyncio.CancelledError:
-            self.state.last_result = self._result(
-                "cancelled", "Cancelled; inspect the diff before continuing."
-            )
+            self.last_result = self.result("cancelled", "Cancelled; completed edits remain.", usage)
             raise
-        except asyncio.TimeoutError:
-            self.state.last_result = self._result("blocked", "Task deadline exceeded")
-        except RunStopped as error:
-            self.state.last_result = self._result("blocked", str(error))
+        except (asyncio.TimeoutError, BudgetExceeded) as error:
+            reason = str(error) or "Task deadline exceeded"
+            self.last_result = self.result("blocked", reason, usage)
         except Exception as error:
-            self.state.last_result = self._result("failed", f"{type(error).__name__}: {error}")
+            self.last_result = self.result("failed", f"{type(error).__name__}: {error}", usage)
         finally:
-            self.state.running = False
-            self.state.edit_ledger = list(self.workspace.edit_ledger)
-            if self.state.last_result is not None:
-                self._event("completed", result=self.state.last_result.model_dump())
-        return self.state.last_result
+            self.running = False
+            if self.last_result is not None:
+                self.ui.completed(self.last_result)
+        return self.last_result
 
-    async def _checks(self, *, baseline=False):
-        self._event("status", text="Checking baseline" if baseline else "Verifying changes")
-        result = await verify(self.workspace, self.config.checks)
-        self._event(
-            "verification",
-            results=[item.model_dump() for item in result.results],
-            passed=result.passed,
-            stable=result.stable,
-            baseline=baseline,
-        )
-        return result
-
-    async def _run(self, task):
-        self._event("user", text=task)
-        self._note(Prompt("coding_harness/task.j2")(task=task))
-        self.state.baseline = await self._checks(baseline=True)
+    async def _run(self, task, usage):
+        self.messages.append({"role": "user", "text": task})
+        self.ui.user(task)
+        baseline = await run_checks(self.workspace, self.config.checks)
+        self.ui.checks(baseline["results"], baseline=True)
+        self.messages.append({"role": "user", "text": feedback(baseline, baseline=True)})
+        results = []
         previous_failure = None
+        limits = self.config.limits
+
         while True:
-            text, requests = await self.step()
-            if requests:
-                continue
-            verification = await self._checks()
-            feedback = render_verification(verification, self.state.baseline)
-            self._note(feedback)
-            changed = await self.workspace.changed_paths()
-            if not self.config.checks:
-                return self._result("unverified", text, changed_paths=changed)
-            fresh = verification.fingerprint == await self.workspace.fingerprint()
-            if verification.passed and verification.stable and fresh:
-                self.state.fingerprint = verification.fingerprint
-                return self._result("verified", text, verification.results, changed)
-            failure = (
-                verification.fingerprint,
+            context = self.context()
+            if len(context) > limits.context_soft_chars:
+                try:
+                    replacement = await session.compact(
+                        self.provider,
+                        self.messages,
+                        limits.context_hard_chars,
+                        before_request=lambda: self.count_request(usage),
+                    )
+                    self.messages = replacement
+                    context = self.context()
+                    self.ui.status("Compacted earlier conversation")
+                except (ValueError, RuntimeError, ProviderError) as error:
+                    self.ui.status(f"Could not compact: {error}")
+            size = len(
                 json.dumps(
-                    [item.command.model_dump() for item in verification.results],
-                    sort_keys=True,
-                ),
-            )
-            if failure == previous_failure:
-                return self._result(
-                    "blocked",
-                    "Checks failed again without workspace progress.",
-                    verification.results,
-                    changed,
+                    {
+                        "context": context,
+                        "results": results,
+                        "tools": [tool.parameters for tool in self.tools.values()],
+                    },
+                    ensure_ascii=False,
                 )
-            if self.state.repairs >= self.config.limits.max_repairs:
-                return self._result(
+            )
+            if size > limits.context_hard_chars:
+                raise BudgetExceeded("Context limit reached; start a new conversation")
+            self.count_request(usage)
+            self.ui.status("Thinking")
+            text, calls = await self.provider.acall(
+                context, tools=list(self.tools.values()), tool_results=results
+            )
+            self.messages.append({"role": "assistant", "text": text, "calls": calls})
+            if text:
+                self.ui.assistant(text)
+            if calls:
+                results = await self.execute(calls, usage)
+                continue
+
+            results = []
+            self.ui.status("Checking changes")
+            verification = await run_checks(self.workspace, self.config.checks)
+            self.ui.checks(verification["results"])
+            paths = await self.workspace.changed_paths()
+            fresh = verification["fingerprint"] == await self.workspace.fingerprint()
+            if not fresh:
+                verification.update(stable=False, passed=False)
+            self.messages.append({"role": "user", "text": feedback(verification)})
+            if not self.config.checks:
+                return self.result("unverified", text, usage, paths=paths)
+            if verification["passed"]:
+                self.fingerprint = verification["fingerprint"]
+                return self.result("verified", text, usage, verification["results"], paths)
+            failure = (
+                verification["fingerprint"],
+                json.dumps(verification["results"], sort_keys=True),
+            )
+            if failure == previous_failure or usage["repairs"] >= limits.max_repairs:
+                return self.result(
                     "blocked",
-                    "Repair budget exhausted.\n" + feedback,
-                    verification.results,
-                    changed,
+                    "Checks still fail.\n" + feedback(verification),
+                    usage,
+                    verification["results"],
+                    paths,
                 )
             previous_failure = failure
-            self.state.repairs += 1
-            self._event("status", text=f"Repair {self.state.repairs}: checks need attention")
+            usage["repairs"] += 1
+            self.ui.status(f"Repair {usage['repairs']}")
 
-    def _size(self, state=None):
-        state = self.state if state is None else state
-        return context_size(
-            render_context(self.workspace, self.config, state, self.session),
-            tools=self.session.tools,
-            tool_results=self.session.ready_results,
-        )
-
-    async def _context(self):
-        size = self._size()
-        limits = self.config.limits
-        if size > limits.context_soft_chars and not self._compacted_last:
-            try:
-                await self._compact()
-            except (ValueError, RuntimeError, ProviderError) as error:
-                self._event("status", text=f"Context summary failed: {error}")
-            size = self._size()
-        if size > limits.context_hard_chars:
-            raise RunStopped("Context exceeds the input-size limit; start a new conversation")
-        return render_context(self.workspace, self.config, self.state, self.session)
-
-    async def step(self):
-        # A restored session may have work that has not started yet.
-        await self._execute_calls(self.session.pending_requests)
-        context = await self._context()
-        self._request_budget()
-        self._event("status", text="Waiting for model")
-        text, requests = await self.session.acall(context, provider=self.provider)
-        self._compacted_last = False
-        if text:
-            self._event("assistant", text=text)
-        await self._execute_calls(requests)
-        return text, requests
-
-    async def _execute_calls(self, calls):
+    async def execute(self, calls, usage):
+        ids = [call["id"] for call in calls]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate tool request IDs")
+        results = []
         try:
             for call in calls:
-                if self.state.tool_calls >= self.config.limits.max_tool_calls:
-                    raise RunStopped("Tool call budget exhausted")
-                self.state.tool_calls += 1
-                self._event(
-                    "tool_started", id=call["id"], name=call["name"], arguments=call["arguments"]
+                if usage["tool_calls"] >= self.config.limits.max_tool_calls:
+                    raise BudgetExceeded("Tool call budget exhausted")
+                usage["tool_calls"] += 1
+                self.ui.status(f"Running {call['name']}")
+                error = False
+                try:
+                    if call.get("argument_error"):
+                        raise ValueError(call["argument_error"])
+                    if call["name"] not in self.tools:
+                        raise ValueError(f"Unknown tool: {call['name']}")
+                    content = await self.tools[call["name"]].ainvoke(call["arguments"])
+                except (ToolError, ValueError) as failure:
+                    content, error = str(failure), True
+                result = {"request": call, "content": content, "is_error": error}
+                results.append(result)
+                self.messages.append(
+                    {
+                        "role": "tool",
+                        "text": content,
+                        "id": call["id"],
+                        "error": error,
+                    }
                 )
-                result = await self.session.resolve(call)
-                self._event(
-                    "tool_finished",
-                    id=call["id"],
-                    name=call["name"],
-                    content=result["content"],
-                    is_error=result["is_error"],
-                )
-        except BaseException:
-            self.session.cancel_pending("run stopped")
-            raise
+                self.ui.tool(call["name"], content, error)
         finally:
-            self.state.edit_ledger = list(self.workspace.edit_ledger)
+            # A follow-up sees interrupted work, but never schedules it again.
+            for call in calls[len(results) :]:
+                self.messages.append(
+                    {
+                        "role": "tool",
+                        "id": call["id"],
+                        "error": True,
+                        "text": "Stopped before completion; inspect files before retrying.",
+                    }
+                )
+        return results
+
+    def context(self):
+        return Prompt("coding_harness/context.j2")(
+            root=str(self.workspace.root),
+            checks=[check.model_dump() for check in self.config.checks],
+            limits=self.config.limits.model_dump(),
+            skills=[SKILLS[name] for name in self.config.skills],
+            history=self.messages,
+        )
+
+    def count_request(self, usage):
+        if usage["turns"] >= self.config.limits.max_turns:
+            raise BudgetExceeded("Model request budget exhausted")
+        usage["turns"] += 1
+
+    def result(self, status, answer, usage, checks=(), paths=None):
+        paths = paths if paths is not None else sorted(self.workspace.edited_paths)
+        changed_checks = verification_paths(paths, self.config.checks, self.workspace.root)
+        if changed_checks:
+            answer += "\nVerification-related files changed: " + ", ".join(changed_checks)
+        return dict(status=status, answer=answer, checks=list(checks), changed_paths=paths, **usage)
 
     async def compact(self):
-        if self.state.running:
+        if self.running:
             raise RuntimeError("Cannot compact during an active run")
-        self.state.running = True
+        self.running = True
         try:
-            await asyncio.wait_for(self._compact(), timeout=self.config.limits.task_timeout)
+            self.messages = await asyncio.wait_for(
+                session.compact(
+                    self.provider, self.messages, self.config.limits.context_hard_chars
+                ),
+                self.config.limits.task_timeout,
+            )
+            self.ui.status("Compacted earlier conversation")
         finally:
-            self.state.running = False
-
-    async def _compact(self):
-        if not history_views(self.session, self.state, include_ready=True):
-            raise ValueError("No conversation to compact")
-        self.state.edit_ledger = list(self.workspace.edit_ledger)
-        text = summary_prompt(self.state, self.config, self.session)
-        self._request_budget()
-        text, requests = await self.provider.acall(text, tools=[])
-        if requests:
-            raise ValueError("Summary must not request tools")
-        summary = parse(text, ContextSummary)
-        checkpoint = Prompt("coding_harness/checkpoint.j2")(
-            task=self.state.task,
-            summary=summary,
-            checks=[check.model_dump() for check in self.config.checks],
-        )
-        cursor = len(self.session.history)
-        notes = [{"after": cursor, "role": "user", "text": checkpoint}]
-        after = self._size(replace(self.state, context_notes=notes, context_start=cursor))
-        if after > self.config.limits.context_hard_chars:
-            raise ValueError("Summary exceeds the input-size limit")
-        before = self._size()
-        self.state.archived_histories.append(
-            history_views(self.session, self.state, include_ready=True)
-        )
-        self.state.context_notes = notes
-        self.state.context_start = cursor
-        self._compacted_last = True
-        self._event("compacted", before=before, after=after)
+            self.running = False
 
     async def new_conversation(self):
-        if self.state.running:
+        if self.running:
             raise RuntimeError("Cannot reset during an active run")
-        self.state.running = True
+        self.running = True
         try:
             await self.workspace.initialize()
-            fingerprint = await self.workspace.fingerprint()
+            self.fingerprint = await self.workspace.fingerprint()
+            self.messages.clear()
+            self.workspace.edited_paths.clear()
+            self.last_result = None
         finally:
-            self.state.running = False
-        self.state = SessionState(
-            provider=self.state.provider,
-            model=self.state.model,
-            root=str(self.workspace.root),
-            head=self.workspace.head,
-            fingerprint=fingerprint,
-        )
-        self.session = Session(provider=self.provider, tools=self.session.tools)
-        self.workspace.edit_ledger.clear()
-        self._compacted_last = False
-        self._event("status", text="New conversation; workspace files preserved")
+            self.running = False
+
+    def save(self, path):
+        session.save(path, self)
+
+
+class BudgetExceeded(RuntimeError):
+    """An explicit task budget stopped the loop."""
+
+
+async def create_agent(provider, root, config, *, ui=None, saved=None):
+    ui = ui or ConsoleUI()
+    if saved is not None and (
+        not Path(saved.root).is_absolute() or Path(saved.root).resolve() != Path(saved.root)
+    ):
+        raise ValueError("Session workspace must be an absolute resolved path")
+    workspace = Workspace(
+        root, checks=config.checks, decide=ui.approve, command_timeout=config.limits.command_timeout
+    )
+    await workspace.initialize(create=saved is None)
+    agent = CodingAgent(provider, workspace, config, ui=ui)
+    agent.fingerprint = await workspace.fingerprint()
+    if saved is not None:
+        if Path(saved.root) != workspace.root or config != saved.config:
+            raise ValueError("Resume configuration does not match saved session")
+        agent.messages = [message.model_dump(exclude_none=True) for message in saved.messages]
+        if saved.fingerprint != agent.fingerprint:
+            agent.messages.append(
+                {
+                    "role": "user",
+                    "text": "Workspace changed since save; read current files and recheck.",
+                }
+            )
+    return agent

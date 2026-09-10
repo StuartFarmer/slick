@@ -46,7 +46,6 @@ def test_partial_work_round_trip_does_not_repeat_completed_effects(completed):
 def snapshot():
     call = request(query="x")
     return {
-        "version": 1,
         "history": [
             {
                 "context": "Go",
@@ -66,12 +65,14 @@ def test_snapshot_errors_identify_nested_fields():
         Session.from_dict(data)
     assert caught.value.errors()[0]["loc"] == ("history", 0, "work", 0, "submitted")
 
+    data["history"][0]["work"][0]["submitted"] = True
+    with pytest.raises(ValueError, match=r"history\[0\]\.work\[0\]"):
+        Session.from_dict(data)
+
 
 @pytest.mark.parametrize(
     "change",
     [
-        lambda d: d.update(version=True),
-        lambda d: d.update(version=2),
         lambda d: d.update(extra="unknown"),
         lambda d: d.update(history={}),
         lambda d: d["history"][0].update(extra=1),
@@ -97,7 +98,7 @@ def test_invalid_snapshots_reject_without_mutating_input(change):
     assert repr(data) == repr(before)
 
 
-def test_empty_legacy_and_submitted_snapshots_round_trip():
+def test_empty_and_submitted_snapshots_round_trip():
     assert Session.from_dict(Session().to_dict()).history == []
     data = snapshot()
     work = data["history"][0]["work"][0]

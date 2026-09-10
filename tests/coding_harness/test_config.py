@@ -3,7 +3,8 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from examples.coding_harness.state import Check, HarnessConfig, Limits, SessionState, load_config
+from examples.coding_harness.checks import Check
+from examples.coding_harness.config import HarnessConfig, Limits, load_config
 
 
 def test_defaults_and_independent_mutable_state():
@@ -18,9 +19,9 @@ def test_defaults_and_independent_mutable_state():
         "context_soft_chars": 80000,
         "context_hard_chars": 120000,
     }
-    first, second = SessionState(), SessionState()
-    first.context_notes.append("a")
-    assert second.context_notes == []
+    first, second = HarnessConfig(), HarnessConfig()
+    first.skills.append("python")
+    assert second.skills == []
 
 
 @pytest.mark.parametrize(

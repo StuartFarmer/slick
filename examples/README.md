@@ -52,6 +52,8 @@ Textual is optional for headless runs. The harness has its own
 CLI options, sessions and explicit check configuration; it supports OpenAI Responses
 and Anthropic Messages, plus LiteLLM tool calls (including OpenRouter).
 See its README for the OpenRouter setup. Its prompts remain under `examples/prompts/`.
+The harness owns a plain conversation list and calls providers and workspace methods
+directly. Its version-2 sessions save that conversation; loading never replays tools.
 
 ## Use a real provider
 

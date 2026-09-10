@@ -8,7 +8,8 @@ from pathlib import Path
 
 from slick.tools import make_request
 
-from .state import Check, HarnessConfig
+from .checks import Check
+from .config import HarnessConfig
 
 BROKEN = "def total(values):\n    return sum(values) + 1\n"
 PARTIAL = "def total(values):\n    return sum(values) if values else 1\n"
@@ -74,34 +75,22 @@ class DemoProvider:
     def identity(self):
         return {"provider": "demo", "model": self.model}
 
-    def _turn(self, text, calls=()):
-        return text, list(calls)
-
     def _call(self, name, arguments):
         self._number += 1
         return make_request(f"demo_{self._number}", name, arguments)
 
     async def acall(self, context, *, tools=None, tool_results=None):
         if not tools:
-            return self._turn(
-                json.dumps(
-                    {
-                        "facts": ["The demo uses real unittest checks."],
-                        "decisions": [],
-                        "open_questions": [],
-                        "modified_files": ["pricing.py"],
-                        "next_steps": ["Read current pricing.py and run the configured checks."],
-                    }
-                )
-            )
+            return "Fix total() in pricing.py; read current files and run unittest checks.", []
         source = (self.root / "pricing.py").read_text(encoding="utf-8")
         if self._await_check:
             self._await_check = False
-            return self._turn("The edit is ready for the configured checks.")
+            return "The edit is ready for the configured checks.", []
         if source == FIXED:
-            return self._turn(
+            return (
                 "Updated total() to handle both ordinary and empty lists. "
-                "The configured checks determine verification."
+                "The configured checks determine verification.",
+                [],
             )
         if source not in {BROKEN, PARTIAL}:
             raise RuntimeError("Demo fixture changed unexpectedly; start a fresh demo")
@@ -111,7 +100,7 @@ class DemoProvider:
                 if "Verification: failed" not in context or "exit_code: 1" not in context:
                     raise RuntimeError("Demo expected a real failed verification before repair")
             self._read = self._call("read_file", {"path": "pricing.py"})
-            return self._turn("I'll inspect the current implementation.", [self._read])
+            return "I'll inspect the current implementation.", [self._read]
         if previous["is_error"]:
             raise RuntimeError("Demo read failed: " + previous["content"])
         observation = json.loads(previous["content"])
@@ -125,4 +114,4 @@ class DemoProvider:
         )
         self._read = None
         self._await_check = True
-        return self._turn("I'll apply a focused edit.", [call])
+        return "I'll apply a focused edit.", [call]

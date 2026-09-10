@@ -11,7 +11,7 @@ import pytest
 from sdk_fakes import sdk_response
 
 from examples.coding_harness import __main__ as cli
-from examples.coding_harness.session import load_session, restore_session, save_session
+from examples.coding_harness.session import load, save
 from slick.providers import ProviderError
 
 MODEL = "openrouter/openai/gpt-oss-120b:nitro"
@@ -80,7 +80,7 @@ def test_cli_litellm_executes_tools_and_returns_the_final_answer(repo, monkeypat
 
 
 def test_litellm_session_round_trip_preserves_history(repo, tmp_path, monkeypatch):
-    from examples.coding_harness.state import HarnessConfig
+    from examples.coding_harness.config import HarnessConfig
     from slick.providers import LiteLLMAPI as LiteLLMProvider
 
     requests = []
@@ -88,20 +88,18 @@ def test_litellm_session_round_trip_preserves_history(repo, tmp_path, monkeypatc
 
     async def run():
         provider = LiteLLMProvider(MODEL)
-        agent = await cli.create_agent(
-            provider, repo, HarnessConfig(), decide=cli.deny, emit=lambda event: None
-        )
+        agent = await cli.create_agent(provider, repo, HarnessConfig())
         await agent.run("First task")
         path = tmp_path.parent / f"{tmp_path.name}-session.json"
-        save_session(path, agent)
-        saved = load_session(path)
-        restored = await restore_session(
-            saved, LiteLLMProvider(MODEL), decide=cli.deny, emit=lambda event: None
+        save(path, agent)
+        saved = load(path)
+        restored = await cli.create_agent(
+            LiteLLMProvider(MODEL), saved.root, saved.config, saved=saved
         )
         result = await restored.run("Follow up")
-        assert result.answer == "Second answer"
-        assert restored.state.provider == "litellm"
-        assert restored.state.model == MODEL
+        assert result["answer"] == "Second answer"
+        assert restored.provider.identity()["provider"] == "litellm"
+        assert restored.provider.model == MODEL
 
     asyncio.run(run())
     assert any("First answer" in message.get("content", "") for message in requests[1]["messages"])

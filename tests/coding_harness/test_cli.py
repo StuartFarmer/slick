@@ -4,103 +4,52 @@ import sys
 
 import pytest
 
-from examples.coding_harness.__main__ import create_agent
-from examples.coding_harness.demo import DemoProvider, create_demo
-from examples.coding_harness.state import HarnessConfig
-from slick.providers import OpenAIAPI
+from examples.coding_harness import __main__ as cli
+from examples.coding_harness.agent import create_agent
+from examples.coding_harness.config import HarnessConfig
+from examples.coding_harness.demo import DemoProvider
 
 
-async def deny(request):
-    return "deny"
-
-
-def test_demo_repairs_a_real_failure(tmp_path):
-    config = create_demo(tmp_path)
-    events = []
-
-    async def run():
-        agent = await create_agent(
-            DemoProvider(tmp_path), tmp_path, config, decide=deny, emit=events.append
-        )
-        return await agent.run("Fix the total calculation")
-
-    result = asyncio.run(run())
-    assert result.status == "verified"
-    assert result.repairs == 1
-    assert (tmp_path / "pricing.py").read_text() == "def total(values):\n    return sum(values)\n"
-    finals = [
-        event.data
-        for event in events
-        if event.kind == "verification" and not event.data["baseline"]
-    ]
-    assert [verification["passed"] for verification in finals] == [False, True]
-
-
-def test_headless_cli_runs_without_textual_import():
+def test_headless_demo_needs_no_textual_import():
     code = """
-import builtins
-real = builtins.__import__
-def guarded(name, *args, **kwargs):
-    if name.split('.')[0] == 'textual':
-        raise AssertionError('headless imported Textual')
-    return real(name, *args, **kwargs)
-builtins.__import__ = guarded
+import sys
+sys.modules['textual'] = None
 from examples.coding_harness.__main__ import main
-raise SystemExit(main(['--dry-run','--headless','--task','Fix total']))
+raise SystemExit(main(['--dry-run', '--headless', '--task', 'Fix the total calculation']))
 """
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, timeout=30
     )
     assert result.returncode == 0, result.stderr
     assert "Verified" in result.stdout
-    assert "1 repair" in result.stdout
 
 
-@pytest.mark.parametrize("provider_args", [[], ["--provider", "openai"]])
-def test_real_provider_requires_workspace_and_model(provider_args):
-    result = subprocess.run(
-        [
-            sys.executable, "-m", "examples.coding_harness", *provider_args,
-            "--headless", "--task", "Fix total",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode == 2
-    assert "--model" in result.stderr
+@pytest.mark.parametrize("extra", [[], ["--model", "model"], ["--workspace", "/tmp"]])
+def test_live_run_requires_model_and_workspace(extra):
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["--headless", "--task", "Fix", *extra])
+    assert caught.value.code == 2
 
 
-def test_demo_does_not_inherit_commit_signing(tmp_path, monkeypatch):
-    git_config = tmp_path / "gitconfig"
-    git_config.write_text("[commit]\n    gpgsign = true\n[gpg]\n    program = /no/such/gpg\n")
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(git_config))
-    root = tmp_path / "demo"
-    root.mkdir()
-    config = create_demo(root)
-    assert config.checks
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--provider", "openai"],
+        ["--model", "model"],
+        ["--workspace", "/tmp"],
+        ["--config", "config.json"],
+        ["--resume", "saved.json"],
+    ],
+)
+def test_demo_rejects_live_options(extra):
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["--dry-run", *extra])
+    assert caught.value.code == 2
 
 
-@pytest.mark.parametrize("existing", [False, True])
-def test_new_workspace_initializes_git_and_supports_file_operations(tmp_path, existing):
-    root = tmp_path / "new" / "workspace"
-    if existing:
-        root.mkdir(parents=True)
-        (root / "notes.txt").write_text("Keep these notes.\n")
-
-    async def run():
-        agent = await create_agent(
-            OpenAIAPI(model="offline"), root, HarnessConfig(), decide=deny, emit=lambda event: None
-        )
-        workspace = agent.workspace
-        assert workspace.head is None
-        before = await workspace.fingerprint()
-        workspace.create_file("hello.py", "print('hello')\n")
-        assert await workspace.fingerprint() != before
-        assert await workspace.changed_paths() == ["hello.py"]
-        assert "hello.py" in (await workspace.git_diff()).untracked
-        if existing:
-            assert workspace.read_file("notes.txt").text == "Keep these notes.\n"
-
-    asyncio.run(run())
+def test_new_workspace_can_be_created_and_edited(tmp_path):
+    root = tmp_path / "new"
+    agent = asyncio.run(create_agent(DemoProvider(root), root, HarnessConfig()))
+    agent.workspace.create_file("hello.py", "print('hello')\n")
     assert (root / ".git").is_dir()
+    assert agent.workspace.read_file("hello.py")["text"] == "print('hello')\n"

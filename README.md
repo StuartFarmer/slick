@@ -316,9 +316,6 @@ provider in a hidden thread or starts an event loop for you.
 
 ```python
 text = await summarize.render(document)  # render without provider execution
-source = summarize.source()             # read the template source
-name = summarize.template_name
-result_type = summarize.returns
 ```
 
 For sync declarations, `.render(...)` is synchronous. A named template leaves
@@ -587,36 +584,27 @@ before parsing or caching. `Prompt`, `render`, and `parse` remain independent
 text operations.
 
 The [coding harness example](examples/coding_harness/README.md) adds error recovery,
-cancellation, workspace tools, verification, saved app state, and a TUI as ordinary
-Python. Run its offline demo with
+cancellation, workspace tools, verification, saved conversations, and a TUI around
+an explicit provider/tool loop. Run its offline demo with
 `python -m examples.coding_harness --dry-run --headless --task 'Fix total'`.
 
-## Explicit execution options
+## Execution and persistence
 
-All `@prompt` declarations default to **no disk logging and no caching**.
-The decorator uses the supplied `provider=` directly and never repairs a response.
-The legacy `model=` decorator option, per-call model overrides, and implicit
-default-provider selection are removed. `model` is now an ordinary template variable.
+`@prompt` renders, calls the supplied `provider=`, and validates the response.
+Applications own caching, logging, output files, and retries. Custom providers only
+need `call` or `acall`; the decorator does not require `identity()`.
 
-Explicit options remain available:
+The decorator no longer accepts `cache=` or `log_dir=`, and `LOG_DIR` is removed.
+`output` is now an ordinary template argument, with no file-writing behavior.
+The `.source()`, `.template_name`, and `.returns` inspection attributes are also
+removed; `.render()` remains available, and the wrapped function retains its
+annotations and docstring.
 
-```python
-@prompt(provider=provider, template="summarize.j2", log_dir="logs/summaries")
-def summarize(document: str) -> Summary:
-    """Summarize a document and log the accepted exchange."""
-```
+For file output, write the returned string in application code, or serialize a
+typed result explicitly. To preserve a model's exact JSON text, use
+`render`, `provider.call/acall`, and `parse` separately and save the raw response
+after validation.
 
-`log_dir=` opts into prompt/response files. `cache=True` opts into reuse of accepted
-responses (under `log_dir` or `LOG_DIR`). Each cache miss makes one provider call;
-parsing failures propagate to the application or session. There is no `max_repairs=`
-option or prompt repair loop.
-`output=` explicitly saves the accepted response to a file, preserving the original
-text, including whitespace or JSON. It is a wrapper option, not a template variable.
-Caching is an application decision, especially for harnesses or external state.
-
-Persistent calls use the provider's JSON-serializable `identity()` to name their
-directory. Built-in providers supply it; custom providers using logging or caching
-implement it themselves. Accepted structured responses are written only after parsing.
 Template errors, bad function arguments, and missing provider methods propagate
 directly from Jinja or Python.
 

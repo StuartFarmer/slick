@@ -2,7 +2,7 @@
 
 import asyncio
 
-from slick import Prompt
+from slick import prompt
 
 from ._cli import ScriptedProvider, parser, positive_int, provider_from_args
 
@@ -18,50 +18,39 @@ class SelfRefiner:
         self.feedback = None
         self.revisions = []
         self.feedback_history = []
-        self.draft_prompt = Prompt("self_refine/draft.j2")
-        self.critique_prompt = Prompt("self_refine/critique.j2")
-        self.revise_prompt = Prompt("self_refine/revise.j2")
 
-    async def draft(self):
-        text = self.draft_prompt(task=self.task)
-        answer, _ = await self.provider.acall(text)
-        self.answer, self.feedback = answer, None
-        self.revisions, self.feedback_history = [answer], []
-        return answer
+    @prompt(template="self_refine/draft.j2")
+    async def draft(self, *, generated: str) -> str:
+        self.answer, self.feedback = generated, None
+        self.revisions, self.feedback_history = [generated], []
+        return generated
 
     async def critique(self):
         if self.answer is None:
             raise ValueError("Create a draft first.")
-        text = self.critique_prompt(
-            task=self.task,
-            answer=self.answer,
-            criteria=self.criteria,
-            revisions=self.revisions,
-            feedback_history=self.feedback_history,
-        )
-        self.feedback, _ = await self.provider.acall(text)
-        return self.feedback
+        return await self.generate_feedback(provider=self.provider)
+
+    @prompt(template="self_refine/critique.j2")
+    async def generate_feedback(self, *, generated: str) -> str:
+        self.feedback = generated
+        return generated
 
     async def revise(self):
         if self.feedback is None:
             raise ValueError("Critique the current answer first.")
-        text = self.revise_prompt(
-            task=self.task,
-            answer=self.answer,
-            feedback=self.feedback,
-            revisions=self.revisions,
-            feedback_history=self.feedback_history,
-        )
-        answer, _ = await self.provider.acall(text)
-        self.revisions.append(answer)
+        return await self.generate_revision(provider=self.provider)
+
+    @prompt(template="self_refine/revise.j2")
+    async def generate_revision(self, *, generated: str) -> str:
+        self.revisions.append(generated)
         self.feedback_history.append(self.feedback)
-        self.answer, self.feedback = answer, None
-        return answer
+        self.answer, self.feedback = generated, None
+        return generated
 
     async def run(self, rounds=2):
         if type(rounds) is not int or rounds < 1:
             raise ValueError("rounds must be a positive integer")
-        await self.draft()
+        await self.draft(provider=self.provider)
         for _ in range(rounds):
             await self.critique()
             await self.revise()
@@ -79,8 +68,8 @@ def main(argv=None):
         responses.extend(
             [
                 "Explain which part renders text and which part executes it.",
-                f"Demo revision {turn + 1}: Prompt renders Jinja arguments into text; "
-                "the provider executes that text. Ordinary Python owns state and sequencing.",
+                f"Demo revision {turn + 1}: @prompt renders Jinja, generates a response, "
+                "and runs the method body. Ordinary Python owns state and sequencing.",
             ]
         )
     provider = provider_from_args(args, p, ScriptedProvider(responses))

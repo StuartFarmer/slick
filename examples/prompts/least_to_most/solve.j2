@@ -1,8 +1,7 @@
 {% from 'parts/examples.j2' import examples %}
-Original problem: {{ problem }}
+Original problem: {{ instance.problem }}
 Previously solved subproblems, available for use in this answer:
-{{ examples(solutions) }}
+{{ examples(instance.solutions) }}
 Solve the current question using the previous answers where relevant:
 {{ question }}
-Return only JSON matching this schema:
-{{ schema | tojson }}
+{{ output_format }}

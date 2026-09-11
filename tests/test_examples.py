@@ -88,12 +88,12 @@ def test_question_answerer_owns_history_and_keeps_critique_separate(monkeypatch)
 
     async def run():
         provider = FakeProvider()
-        qa = example.QuestionAnswerer(provider)
-        other = example.QuestionAnswerer(provider)
-        assert await qa.ask("My name is Ada.") == "Hello, Ada."
-        answer = await qa.ask("What is my name?")
+        qa = example.QuestionAnswerer()
+        other = example.QuestionAnswerer()
+        assert await qa.ask("My name is Ada.", provider=provider) == "Hello, Ada."
+        answer = await qa.ask("What is my name?", provider=provider)
         history = list(qa.history)
-        assert await qa.critique(answer) == "The answer is supported."
+        assert await qa.critique(answer, provider=provider) == "The answer is supported."
         assert (
             qa.history
             == history
@@ -121,7 +121,7 @@ def test_question_answerer_does_not_record_failed_exchange(monkeypatch):
         async def acall(self, text):
             raise RuntimeError("provider unavailable")
 
-    qa = example.QuestionAnswerer(FakeProvider())
+    qa = example.QuestionAnswerer()
     with pytest.raises(RuntimeError, match="provider unavailable"):
-        asyncio.run(qa.ask("Hello"))
+        asyncio.run(qa.ask("Hello", provider=FakeProvider()))
     assert qa.history == []

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from slick import prompts
+from slick import Session, prompts
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -61,14 +61,14 @@ def test_self_refiner_methods_and_failed_draft_preserve_state(template_root):
         writer = module.SelfRefiner("Explain Slick", provider, ["Accuracy"])
         with pytest.raises(ValueError):
             await writer.critique()
-        assert await writer.draft() == "draft"
+        assert await writer.draft(provider=provider) == "draft"
         assert await writer.critique() == "add evidence"
         assert await writer.revise() == "revision"
         assert writer.feedback is None
         assert "Accuracy" in provider.inputs[1]
         assert "draft" in provider.inputs[2] and "add evidence" in provider.inputs[2]
         with pytest.raises(RuntimeError):
-            await writer.draft()
+            await writer.draft(provider=provider)
         assert writer.answer == "revision"
 
     asyncio.run(run())
@@ -125,3 +125,27 @@ def test_grounded_answer_checks_citations_against_retrieved_evidence(template_ro
     with pytest.raises(ValueError, match="citation"):
         asyncio.run(qa.ask("history"))
     assert qa.answer is None
+
+
+@pytest.mark.parametrize("use_session", [False, True])
+def test_decorated_classifier_validates_before_updating_state(template_root, use_session):
+    from pydantic import ValidationError
+
+    from examples._cli import ScriptedProvider
+    from examples.few_shot import FewShotAnswerer
+
+    provider = ScriptedProvider(['"positive"', '"unknown"'])
+    qa = FewShotAnswerer([{"input": "Great!", "output": '"positive"'}])
+    execution = {"session": Session(provider=provider)} if use_session else {"provider": provider}
+
+    async def run():
+        context = await qa.ask.render(qa, "Wonderful")
+        assert "Great!" in context and "Wonderful" in context
+        assert context.count("# Output Format") == 1
+        assert qa.answer is None
+        assert await qa.ask("Wonderful", **execution) == qa.answer == "positive"
+        with pytest.raises(ValidationError):
+            await qa.ask("Unknown", **execution)
+        assert qa.answer == "positive"
+
+    asyncio.run(run())

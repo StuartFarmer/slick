@@ -10,10 +10,10 @@ import re
 import sys
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field
 
 from examples._cli import ScriptedProvider, parser, positive_int, provider_from_args
-from slick import Prompt, parse
+from slick import prompt
 
 DEFAULT_GOAL = "When does Atlas launch, and what must happen first?"
 DOCUMENTS = [
@@ -59,7 +59,6 @@ class Researcher:
         self.observations: list[dict] = []
         self.evidence: dict[str, dict] = {}
         self.result: Finish | None = None
-        self.action_prompt = Prompt("react/action.j2")
 
     def search_documents(self, query: str) -> list[dict]:
         """Return local documents containing any complete query word, in corpus order."""
@@ -76,16 +75,11 @@ class Researcher:
         if self.steps >= self.max_steps:
             raise RuntimeError(f"Research step budget exhausted ({self.max_steps})")
         self.steps += 1
-        text = self.action_prompt(
-            goal=self.goal,
-            tools=list(self.tools),
-            records=self.observations,
-            documents=list(self.evidence.values()),
-            remaining=self.max_steps - self.steps,
-            schema=TypeAdapter(Action).json_schema(),
-        )
-        response, _ = await self.provider.acall(text)
-        action = parse(response, Action)
+        return await self.act(provider=self.provider)
+
+    @prompt(template="react/action.j2", output_type=Action)
+    async def act(self, *, generated: Action) -> Search | Finish:
+        action = generated
         if isinstance(action, Search):
             if action.tool not in self.tools:
                 raise ValueError(f"Tool is not allowlisted: {action.tool}")

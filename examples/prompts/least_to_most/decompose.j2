@@ -1,6 +1,5 @@
-Break the original problem into 1 to {{ limit }} simpler subproblems.
+Break the original problem into 1 to {{ instance.max_subproblems }} simpler subproblems.
 Order prerequisites before the subproblems that use them. Do not include the original
 problem itself; it will be solved last using all subproblem answers.
-Original problem: {{ problem }}
-Return only JSON matching this schema:
-{{ schema | tojson }}
+Original problem: {{ instance.problem }}
+{{ output_format }}

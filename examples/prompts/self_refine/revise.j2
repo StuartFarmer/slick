@@ -1,16 +1,16 @@
 {% include "shared/style.j2" %}
 Revise the answer using the feedback. Return the improved answer only.
-Task: {{ task }}
+Task: {{ instance.task }}
 Current answer:
-{{ answer }}
+{{ instance.answer }}
 Feedback:
-{{ feedback }}
+{{ instance.feedback }}
 
 Earlier drafts:
-{% for revision in revisions %}
+{% for revision in instance.revisions %}
 {{ loop.index }}. {{ revision }}
 {% endfor %}
 Earlier feedback:
-{% for item in feedback_history %}
+{% for item in instance.feedback_history %}
 {{ loop.index }}. {{ item }}
 {% endfor %}

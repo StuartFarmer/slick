@@ -6,7 +6,7 @@ import re
 
 from pydantic import BaseModel
 
-from slick import Prompt, parse
+from slick import prompt
 
 from ._cli import ScriptedProvider, parser, provider_from_args
 
@@ -20,7 +20,6 @@ class GroundedAnswerer:
     def __init__(self, provider, documents):
         self.provider = provider
         self.documents = documents
-        self.prompt = Prompt("rag/answer.j2")
         self.evidence = []
         self.answer = None
 
@@ -36,15 +35,16 @@ class GroundedAnswerer:
 
     async def ask(self, question):
         documents = self.retrieve(question)
-        text = self.prompt(
-            question=question, documents=documents, schema=GroundedAnswer.model_json_schema()
-        )
-        response, _ = await self.provider.acall(text)
-        answer = parse(response, GroundedAnswer)
-        if not set(answer.citations) <= {document["id"] for document in documents}:
+        return await self.answer_from(question, documents, provider=self.provider)
+
+    @prompt(template="rag/answer.j2", output_type=GroundedAnswer)
+    async def answer_from(
+        self, question: str, documents: list[dict], *, generated: GroundedAnswer
+    ) -> GroundedAnswer:
+        if not set(generated.citations) <= {document["id"] for document in documents}:
             raise ValueError("Answer contains a citation outside the retrieved evidence")
-        self.evidence, self.answer = documents, answer
-        return answer
+        self.evidence, self.answer = documents, generated
+        return generated
 
 
 def main(argv=None):

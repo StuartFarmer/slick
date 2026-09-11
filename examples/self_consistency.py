@@ -12,7 +12,7 @@ from itertools import cycle, islice
 from pydantic import BaseModel, ConfigDict, Field
 
 from examples._cli import ScriptedProvider, parser, positive_int, provider_from_args
-from slick import Prompt, parse
+from slick import prompt
 
 
 class Solution(BaseModel):
@@ -27,16 +27,17 @@ class SolutionSampler:
         self.provider = provider
         self.samples: list[Solution] = []
         self.votes: Counter[str] = Counter()
-        self.sample_prompt = Prompt("self_consistency/sample.j2")
+
+    @prompt(template="self_consistency/sample.j2", output_type=Solution)
+    async def solve(self, *, generated: Solution) -> Solution:
+        self.samples.append(generated)
+        return generated
 
     async def sample(self, count: int = 3) -> list[Solution]:
         if type(count) is not int or count < 1:
             raise ValueError("count must be a positive integer")
         for _ in range(count):
-            text = self.sample_prompt(problem=self.problem, schema=Solution.model_json_schema())
-            response, _ = await self.provider.acall(text)
-            solution = parse(response, Solution)
-            self.samples.append(solution)
+            await self.solve(provider=self.provider)
         return self.samples
 
     def choose(self) -> Solution:

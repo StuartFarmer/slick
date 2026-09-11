@@ -87,7 +87,7 @@ def test_tree_depth_exhaustion_and_nonfinite_scores():
     assert len(provider.inputs) == 2
     invalid = module.ThoughtSearch("Task", FakeProvider([{"score": float("nan")}]))
     with pytest.raises(ValidationError):
-        asyncio.run(invalid.evaluate(module.ThoughtState(steps=("a",))))
+        asyncio.run(invalid.evaluate(module.ThoughtState(steps=("a",)), provider=invalid.provider))
 
 
 def test_tree_rejects_excessive_expansion():
@@ -124,7 +124,7 @@ def test_least_to_most_rejects_plan_over_bound():
         "Task", FakeProvider([{"subproblems": ["a", "b"]}]), max_subproblems=1
     )
     with pytest.raises(ValueError, match="max_subproblems"):
-        asyncio.run(solver.decompose())
+        asyncio.run(solver.decompose(provider=solver.provider))
     assert solver.subproblems == []
 
 
@@ -171,7 +171,7 @@ def test_tree_rejects_invalid_numeric_scores(score):
     module = importlib.import_module("examples.tree_of_thoughts")
     search = module.ThoughtSearch("Task", FakeProvider([{"score": score}]))
     with pytest.raises(ValidationError):
-        asyncio.run(search.evaluate(module.ThoughtState(steps=("a",))))
+        asyncio.run(search.evaluate(module.ThoughtState(steps=("a",)), provider=search.provider))
 
 
 @pytest.mark.parametrize("limit", ["max_depth", "beam_width", "breadth"])

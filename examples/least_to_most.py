@@ -6,7 +6,7 @@ import json
 from pydantic import BaseModel, Field, constr
 
 from examples._cli import ScriptedProvider, parser, positive_int, provider_from_args
-from slick import Prompt, parse
+from slick import prompt
 
 NonemptyText = constr(strip_whitespace=True, min_length=1)
 
@@ -29,20 +29,12 @@ class LeastToMost:
         self.subproblems: list[str] = []
         self.solutions: list[dict[str, str]] = []
         self.answer: str | None = None
-        self.decompose_prompt = Prompt("least_to_most/decompose.j2")
-        self.solve_prompt = Prompt("least_to_most/solve.j2")
 
-    async def decompose(self) -> list[str]:
-        text = self.decompose_prompt(
-            problem=self.problem,
-            limit=self.max_subproblems,
-            schema=Decomposition.model_json_schema(),
-        )
-        response, _ = await self.provider.acall(text)
-        plan = parse(response, Decomposition)
-        if len(plan.subproblems) > self.max_subproblems:
+    @prompt(template="least_to_most/decompose.j2", output_type=Decomposition)
+    async def decompose(self, *, generated: Decomposition) -> list[str]:
+        if len(generated.subproblems) > self.max_subproblems:
             raise ValueError("decomposition exceeds max_subproblems")
-        self.subproblems = plan.subproblems
+        self.subproblems = generated.subproblems
         self.solutions = []
         self.answer = None
         return self.subproblems
@@ -54,21 +46,18 @@ class LeastToMost:
             raise ValueError("the original problem is already solved")
         index = len(self.solutions)
         question = self.subproblems[index] if index < len(self.subproblems) else self.problem
-        text = self.solve_prompt(
-            problem=self.problem,
-            question=question,
-            solutions=self.solutions,
-            schema=Answer.model_json_schema(),
-        )
-        response, _ = await self.provider.acall(text)
-        result = parse(response, Answer)
+        result = await self.solve(question, provider=self.provider)
         self.solutions.append({"input": question, "output": result.answer})
         if index == len(self.subproblems):
             self.answer = result.answer
         return result.answer
 
+    @prompt(template="least_to_most/solve.j2", output_type=Answer)
+    async def solve(self, question: str) -> Answer:
+        """Answer one question using the earlier solutions."""
+
     async def run(self) -> str:
-        await self.decompose()
+        await self.decompose(provider=self.provider)
         for _ in range(len(self.subproblems) + 1):
             answer = await self.solve_next()
         return answer

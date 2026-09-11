@@ -1,7 +1,8 @@
 # Runnable patterns
 
-These are ordinary Python application classes using Slick's `Prompt`, provider
-`acall`, and `parse`. Each class owns its state and methods. Sequencing, retrieval,
+These are ordinary Python application classes using Slick's `@prompt` and `Session`.
+Decorators render templates, generate typed results, and pass them to Python bodies
+as `generated` for validation and state updates. Each class owns its state and methods. Sequencing, retrieval,
 tool execution, voting, and search are Python code you can change directly.
 All templates live here in `examples/prompts/`; none are part of the Slick package.
 
@@ -12,7 +13,7 @@ example independently:
 | --- | --- | --- |
 | Shared context primitives | `python -m examples.primitives` | Render all seven parts without a provider |
 | Conversation | `python -m examples.question_answerer --critique` | `QuestionAnswerer.ask`, `critique`; instance-owned history |
-| Automatic Session | `python -m examples.session` | Registered Python tools, automatic recording and result submission |
+| Automatic Session | `python -m examples.session` | `@prompt` with a tool-enabled session and a four-turn limit |
 | Few-shot | `python -m examples.few_shot` | `FewShotAnswerer.ask`; classify using input/output examples |
 | Chain-of-thought | `python -m examples.chain_of_thought` | `ReasoningSolver.solve`; worked examples and a concise, checkable explanation |
 | Retrieval-grounded answering | `python -m examples.rag` | `GroundedAnswerer.retrieve`, `ask`; local retrieval and cited answers |
@@ -28,7 +29,7 @@ The default `--provider demo` uses canned responses and requires no credentials.
 Templates, validation, state changes, tool execution, and loops still run. Canned
 answers demonstrate the default tasks; changing the task does not make the demo
 responses intelligent. Use `--help` on each module to see its input and budget flags.
-The earlier functional example remains available as `python -m examples.core`.
+The functional example is available as `python -m examples.core`.
 
 ## OCR paper to implementation plan
 
@@ -200,8 +201,11 @@ Textual is optional for headless runs. The harness has its own
 CLI options, sessions and explicit check configuration; it supports OpenAI Responses
 and Anthropic Messages, plus LiteLLM tool calls (including OpenRouter).
 See its README for the OpenRouter setup. Its prompts remain under `examples/prompts/`.
-The harness owns a plain conversation list and calls providers and workspace methods
-directly. Its version-2 sessions save that conversation; loading never replays tools.
+The harness keeps a plain conversation list for display and saving. A fresh Slick
+`Session` per task records exchanges, resolves tools, and submits their results.
+Its explicit loop enforces request/tool budgets, updates the UI, and checks edits.
+Compaction uses `@prompt` with a session offering no tools. Version-2 saved
+conversations retain their format; loading never replays tools.
 
 ## Use a real provider
 
@@ -225,8 +229,8 @@ python -m examples.self_refine --provider claude --task "Explain DNS" --rounds 1
 
 These options make real calls. Multi-step patterns make multiple calls; loop
 budgets belong to the example, while the timeout applies to each provider call.
-Structured examples put their JSON schema in the prompt and validate responses
-locally with `parse`.
+Structured examples declare `output_type=` on `@prompt`; the decorator supplies
+the JSON schema and validates responses before their Python bodies run.
 
 ## Reuse the classes
 
@@ -242,15 +246,28 @@ from examples.self_refine import SelfRefiner
 
 prompts.TEMPLATE_ROOT = Path("examples/prompts")
 writer = SelfRefiner("Explain DNS", provider, ["Accuracy", "Clarity"])
-draft = await writer.draft()
+draft = await writer.draft(provider=provider)
 feedback = await writer.critique()
 answer = await writer.revise()
 ```
 
-Here `provider` is any object with `async acall(context) -> tuple[str, list[dict]]`. A prompt stores only
-its template filename; the class decides when to render and execute it. Instances
-are intended for sequential use, and their state stays in memory. A new CLI
-invocation starts a new instance.
+Here `provider` is any object with `async acall(context) -> tuple[str, list[dict]]`.
+Direct decorated calls require exactly one of `provider=` or `session=`, as in
+`paper_plan.py`. Method templates access instance state through `instance` and
+arguments by name. `output_type=` controls generated data; return annotations
+describe the postprocessed result. Templates use `{{ output_format }}` to place
+the decorator's output instructions without duplicating schemas.
+
+Ordinary orchestration methods such as `run()`, `critique()`, `solve_next()`, and
+`step()` supply their instance's provider to decorated calls. Retrieval and
+precondition/budget checks run before generation; citation checks, voting, and
+state updates stay in Python. Instances are intended for sequential use, and their
+state stays in memory. A new CLI invocation starts a new instance.
+
+`examples.session` passes a tool-enabled `Session` to a decorated function; Slick
+runs the tool conversation up to `max_turns=4` and returns the final answer. Use
+`Prompt` directly for rendering alone, as in `examples.primitives` and the paper
+report formatter.
 
 ## Shared Jinja parts
 

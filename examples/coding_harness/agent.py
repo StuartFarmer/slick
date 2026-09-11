@@ -4,9 +4,9 @@ import asyncio
 import json
 from pathlib import Path
 
-from slick import Prompt
+from slick import Prompt, Session
 from slick.providers import ProviderError
-from slick.tools import ToolError, prepare_tools
+from slick.tools import prepare_tools
 
 from . import session
 from .checks import feedback, run_checks, verification_paths
@@ -73,7 +73,8 @@ class CodingAgent:
         baseline = await run_checks(self.workspace, self.config.checks)
         self.ui.checks(baseline["results"], baseline=True)
         self.messages.append({"role": "user", "text": feedback(baseline, baseline=True)})
-        results = []
+        # Each task starts fresh; interrupted requests remain observations, never queued work.
+        conversation = Session(provider=self.provider, tools=list(self.tools.values()))
         previous_failure = None
         limits = self.config.limits
 
@@ -96,7 +97,7 @@ class CodingAgent:
                 json.dumps(
                     {
                         "context": context,
-                        "results": results,
+                        "results": conversation.ready_results,
                         "tools": [tool.parameters for tool in self.tools.values()],
                     },
                     ensure_ascii=False,
@@ -106,17 +107,14 @@ class CodingAgent:
                 raise BudgetExceeded("Context limit reached; start a new conversation")
             self.count_request(usage)
             self.ui.status("Thinking")
-            text, calls = await self.provider.acall(
-                context, tools=list(self.tools.values()), tool_results=results
-            )
+            text, calls = await conversation.acall(context)
             self.messages.append({"role": "assistant", "text": text, "calls": calls})
             if text:
                 self.ui.assistant(text)
             if calls:
-                results = await self.execute(calls, usage)
+                await self.execute(conversation, usage)
                 continue
 
-            results = []
             self.ui.status("Checking changes")
             verification = await run_checks(self.workspace, self.config.checks)
             self.ui.checks(verification["results"])
@@ -146,28 +144,21 @@ class CodingAgent:
             usage["repairs"] += 1
             self.ui.status(f"Repair {usage['repairs']}")
 
-    async def execute(self, calls, usage):
+    async def execute(self, conversation, usage):
+        calls = conversation.pending_requests
         ids = [call["id"] for call in calls]
         if len(ids) != len(set(ids)):
             raise ValueError("Duplicate tool request IDs")
-        results = []
+        completed = 0
         try:
             for call in calls:
                 if usage["tool_calls"] >= self.config.limits.max_tool_calls:
                     raise BudgetExceeded("Tool call budget exhausted")
                 usage["tool_calls"] += 1
                 self.ui.status(f"Running {call['name']}")
-                error = False
-                try:
-                    if call.get("argument_error"):
-                        raise ValueError(call["argument_error"])
-                    if call["name"] not in self.tools:
-                        raise ValueError(f"Unknown tool: {call['name']}")
-                    content = await self.tools[call["name"]].ainvoke(call["arguments"])
-                except (ToolError, ValueError) as failure:
-                    content, error = str(failure), True
-                result = {"request": call, "content": content, "is_error": error}
-                results.append(result)
+                result = await conversation.resolve(call)
+                content, error = result["content"], result["is_error"]
+                completed += 1
                 self.messages.append(
                     {
                         "role": "tool",
@@ -179,7 +170,7 @@ class CodingAgent:
                 self.ui.tool(call["name"], content, error)
         finally:
             # A follow-up sees interrupted work, but never schedules it again.
-            for call in calls[len(results) :]:
+            for call in calls[completed:]:
                 self.messages.append(
                     {
                         "role": "tool",
@@ -188,7 +179,6 @@ class CodingAgent:
                         "text": "Stopped before completion; inspect files before retrying.",
                     }
                 )
-        return results
 
     def context(self):
         return Prompt("coding_harness/context.j2")(

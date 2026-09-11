@@ -1,7 +1,6 @@
 {% from "parts/examples.j2" import examples %}
 Classify the sentiment using these demonstrations:
-{{ examples(demonstrations) }}
+{{ examples(instance.demonstrations) }}
 Input:
 {{ question }}
-Return only a JSON value matching this schema:
-{{ schema | tojson }}
+{{ output_format }}

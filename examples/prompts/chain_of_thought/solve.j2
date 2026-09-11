@@ -1,7 +1,6 @@
 {% from "parts/examples.j2" import examples %}
 Use these worked solutions as examples. Provide a concise, checkable explanation
 and a final answer to the new question.
-{{ examples(demonstrations) }}
+{{ examples(instance.demonstrations) }}
 Question: {{ question }}
-Return only JSON matching this schema:
-{{ schema | tojson }}
+{{ output_format }}

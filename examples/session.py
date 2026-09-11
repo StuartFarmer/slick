@@ -2,7 +2,7 @@
 
 import asyncio
 
-from slick import Prompt, Session
+from slick import Session, prompt
 
 from ._cli import parser, provider_from_args
 
@@ -36,16 +36,14 @@ class DemoProvider:
         return "Search result: " + tool_results[0]["content"], []
 
 
+@prompt(template="session.j2", max_turns=4)
+async def find_documents(task: str) -> str:
+    """Search with registered tools and answer from their results."""
+
+
 async def run(provider, documents, task):
     session = Session(provider=provider, tools=[documents.search])
-    prompt = Prompt("session.j2")
-    for _ in range(4):
-        context = prompt(task=task, observations=[item["text"] for item in session.history])
-        text, requests = await session.acall(context)
-        if not requests:
-            return text
-        await session.resolve_pending()
-    raise RuntimeError("Example reached its four-call limit")
+    return await find_documents(task, session=session)
 
 
 def main(argv=None):

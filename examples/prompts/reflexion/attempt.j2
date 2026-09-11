@@ -1,13 +1,12 @@
 {% from "parts/rubric.j2" import rubric %}
 {% from "parts/working_state.j2" import working_state %}
-Task guidance: {{ task }}
+Task guidance: {{ instance.task }}
 Propose a number list that passes the fixed Python checker.
-{{ rubric(criteria) }}
+{{ rubric(instance.criteria) }}
 
 Lessons from prior attempts are retained in Decisions:
-{{ working_state(state) }}
+{{ working_state({"facts": instance.criteria, "decisions": instance.lessons, "questions": []}) }}
 Previous attempts and actual checker feedback:
-{{ history | tojson }}
+{{ instance.history | tojson }}
 
-Return only JSON matching this schema:
-{{ schema | tojson }}
+{{ output_format }}

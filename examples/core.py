@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from slick import prompt, prompts, render
+from slick import prompt, prompts
 
 
 class Summary(BaseModel):
@@ -32,6 +32,10 @@ async def run(provider) -> dict:
     async def reply(question: str, messages: list[dict]) -> str:
         """Answer using the supplied history."""
 
+    @prompt(template="answer.j2")
+    async def answer(question: str, documents: list[str]) -> str:
+        """Answer using retrieved documents."""
+
     summary = await summarize(
         "Slick renders Jinja, calls a provider, and parses the result.", provider=provider
     )
@@ -43,8 +47,7 @@ async def run(provider) -> dict:
 
     question = "How can I supply history?"
     documents = await search_documents(question)
-    text = render("answer.j2", question=question, documents=documents)
-    retrieval, _ = await provider.acall(text)
+    retrieval = await answer(question, documents, provider=provider)
     return {"summary": summary, "conversation": conversation, "retrieval": retrieval}
 
 

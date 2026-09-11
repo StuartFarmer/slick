@@ -1,11 +1,10 @@
 {% from "parts/rubric.j2" import rubric %}
-Task guidance: {{ task }}
-{{ rubric(criteria) }}
-Failed candidate: {{ candidate | tojson }}
-Actual Python checker feedback: {{ feedback | tojson }}
-Existing lessons: {{ lessons | tojson }}
+Task guidance: {{ instance.task }}
+{{ rubric(instance.criteria) }}
+Failed candidate: {{ candidate.model_dump() | tojson }}
+Actual Python checker feedback: {{ feedback.model_dump() | tojson }}
+Existing lessons: {{ instance.lessons | tojson }}
 
 Write one short, actionable lesson to help the next attempt satisfy the failed criteria.
 The lesson will be appended to the next prompt; it does not update model weights.
-Return only JSON matching this schema:
-{{ schema | tojson }}
+{{ output_format }}

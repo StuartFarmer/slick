@@ -2,14 +2,16 @@
 
 A coding agent expressed as a conversation list and a loop:
 
-1. Render the conversation with Jinja and call a Slick provider.
-2. Run the requested workspace methods and append their results.
+1. Render the conversation with Jinja and call a Slick `Session`.
+2. Resolve requested workspace methods through the session and display their results.
 3. When the model finishes, run the configured checks.
 4. Give failures back to the model and repeat within a repair budget.
 
-The code uses Slick's prompts, provider transport, and tool schema generation.
-The loop owns the conversation explicitly. See [`../session.py`](../session.py)
-for the separate example of Slick's automatic `Session` bookkeeping.
+The session records exchanges, executes tools once, and submits their results.
+The explicit loop owns request/tool budgets, UI updates, compaction, and checks.
+Compaction uses `@prompt` with a session offering no tools. See
+[`../session.py`](../session.py) for a complete automatic tool loop using
+`@prompt(..., max_turns=4)` and `session=`.
 
 ## Try it offline
 
@@ -119,6 +121,9 @@ identity. They contain source/output observations, but no credentials or approva
 allowances. Save is atomic, refuses existing files/symlinks, and uses mode 0600;
 save/load is limited to 20 MiB. Nothing is saved automatically.
 
+Each task creates a fresh Slick `Session` for its tool exchanges. Saved files keep
+the display conversation, so stopped tool requests cannot become pending work on resume.
+
 **This redesign uses session format 2. Earlier harness snapshots are rejected with
 an explicit error.** Resume restores conversation, never schedules recorded tools,
 and starts fresh task budgets. Interrupted calls stay observations; the model must
@@ -150,7 +155,7 @@ files, dependencies or environmental changes.
 
 | File | Job |
 | --- | --- |
-| `agent.py` | One conversation, explicit provider/tool/check loop, task budgets |
+| `agent.py` | Display conversation, Session exchanges and tools, checks and task budgets |
 | `workspace.py` | Direct file/search/command/diff methods and their guards |
 | `checks.py` | Run checks and format real feedback |
 | `session.py` | Save/load a conversation and summarize older messages |

@@ -12,7 +12,7 @@ import sys
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from examples._cli import ScriptedProvider, parser, positive_int, provider_from_args
-from slick import Prompt, parse
+from slick import prompt
 
 CRITERIA = [
     "Return exactly three integers.",
@@ -50,22 +50,17 @@ class ReflectiveSolver:
         self.lessons: list[str] = []
         self.history: list[dict] = []
         self.result: Candidate | None = None
-        self.attempt_prompt = Prompt("reflexion/attempt.j2")
-        self.reflection_prompt = Prompt("reflexion/reflect.j2")
+        self.criteria = CRITERIA
 
     async def attempt(self) -> Candidate:
         if self.attempt_count >= self.max_attempts:
             raise RuntimeError(f"Attempt budget exhausted ({self.max_attempts})")
         self.attempt_count += 1
-        text = self.attempt_prompt(
-            task=self.task,
-            criteria=CRITERIA,
-            history=self.history,
-            state={"facts": CRITERIA, "decisions": self.lessons, "questions": []},
-            schema=Candidate.model_json_schema(),
-        )
-        response, _ = await self.provider.acall(text)
-        return parse(response, Candidate)
+        return await self.propose(provider=self.provider)
+
+    @prompt(template="reflexion/attempt.j2", output_type=Candidate)
+    async def propose(self) -> Candidate:
+        """Propose numbers using the retained lessons and checker history."""
 
     def evaluate(self, candidate: Candidate) -> Feedback:
         """Compute feedback in Python; the model cannot declare its own success."""
@@ -85,19 +80,12 @@ class ReflectiveSolver:
         )
         return feedback
 
-    async def reflect(self, candidate: Candidate, feedback: Feedback) -> Reflection:
-        text = self.reflection_prompt(
-            task=self.task,
-            criteria=CRITERIA,
-            candidate=candidate.model_dump(),
-            feedback=feedback.model_dump(),
-            lessons=self.lessons,
-            schema=Reflection.model_json_schema(),
-        )
-        response, _ = await self.provider.acall(text)
-        reflection = parse(response, Reflection)
-        self.lessons.append(reflection.lesson)
-        return reflection
+    @prompt(template="reflexion/reflect.j2", output_type=Reflection)
+    async def reflect(
+        self, candidate: Candidate, feedback: Feedback, *, generated: Reflection
+    ) -> Reflection:
+        self.lessons.append(generated.lesson)
+        return generated
 
     async def run(self) -> Candidate:
         while self.result is None:
@@ -106,7 +94,7 @@ class ReflectiveSolver:
             if feedback.passed:
                 self.result = candidate
             elif self.attempt_count < self.max_attempts:
-                await self.reflect(candidate, feedback)
+                await self.reflect(candidate, feedback, provider=self.provider)
             else:
                 raise RuntimeError(
                     f"Attempt budget exhausted ({self.max_attempts}): {feedback.errors}"

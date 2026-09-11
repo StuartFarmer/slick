@@ -4,7 +4,7 @@ import asyncio
 
 from pydantic import BaseModel
 
-from slick import Prompt, parse
+from slick import prompt
 
 from ._cli import ScriptedProvider, parser, provider_from_args
 
@@ -15,9 +15,7 @@ class Solution(BaseModel):
 
 
 class ReasoningSolver:
-    def __init__(self, provider):
-        self.provider = provider
-        self.prompt = Prompt("chain_of_thought/solve.j2")
+    def __init__(self):
         self.solution = None
         self.demonstrations = [
             {
@@ -26,16 +24,10 @@ class ReasoningSolver:
             },
         ]
 
-    async def solve(self, question):
-        text = self.prompt(
-            question=question,
-            demonstrations=self.demonstrations,
-            schema=Solution.model_json_schema(),
-        )
-        response, _ = await self.provider.acall(text)
-        solution = parse(response, Solution)
-        self.solution = solution
-        return solution
+    @prompt(template="chain_of_thought/solve.j2", output_type=Solution)
+    async def solve(self, question: str, *, generated: Solution) -> Solution:
+        self.solution = generated
+        return generated
 
 
 def main(argv=None):
@@ -51,7 +43,8 @@ def main(argv=None):
             ['{"explanation":"5 times 6 is 30; subtract 4 to get 26.","answer":"26"}']
         ),
     )
-    print(asyncio.run(ReasoningSolver(provider).solve(args.question)).model_dump_json(indent=2))
+    solver = ReasoningSolver()
+    print(asyncio.run(solver.solve(args.question, provider=provider)).model_dump_json(indent=2))
 
 
 if __name__ == "__main__":

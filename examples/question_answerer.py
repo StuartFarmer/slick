@@ -2,35 +2,30 @@
 
 import asyncio
 
-from slick import Prompt
+from slick import prompt
 
 from ._cli import ScriptedProvider, parser, provider_from_args
 
 
 class QuestionAnswerer:
-    """Own a provider and history; call methods sequentially on each instance."""
+    """Own history; supply a provider or session to each decorated call."""
 
-    def __init__(self, provider):
-        self.provider = provider
+    def __init__(self):
         self.history: list[dict[str, str]] = []
-        self.answer_prompt = Prompt("conversation.j2")
-        self.critique_prompt = Prompt("critique.j2")
 
-    async def ask(self, question: str) -> str:
-        text = self.answer_prompt(question=question, messages=self.history)
-        answer, _ = await self.provider.acall(text)
+    @prompt(template="question_answerer/answer.j2")
+    async def ask(self, question: str, *, generated: str) -> str:
         self.history.extend(
             [
                 {"role": "user", "content": question},
-                {"role": "assistant", "content": answer},
+                {"role": "assistant", "content": generated},
             ]
         )
-        return answer
+        return generated
 
+    @prompt(template="critique.j2")
     async def critique(self, answer: str) -> str:
-        text = self.critique_prompt(answer=answer)
-        response, _ = await self.provider.acall(text)
-        return response
+        """Critique without changing the conversation history."""
 
 
 def main(argv=None):
@@ -42,14 +37,14 @@ def main(argv=None):
     responses = [f"Demo answer to: {question}" for question in questions]
     responses.append("Demo critique: check the answer against the conversation.")
     provider = provider_from_args(args, p, ScriptedProvider(responses))
-    qa = QuestionAnswerer(provider)
+    qa = QuestionAnswerer()
 
     async def run():
         for question in questions:
-            answer = await qa.ask(question)
+            answer = await qa.ask(question, provider=provider)
             print(answer)
         if args.critique:
-            print(await qa.critique(answer))
+            print(await qa.critique(answer, provider=provider))
 
     asyncio.run(run())
 

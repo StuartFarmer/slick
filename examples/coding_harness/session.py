@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from slick import Prompt
+from slick import Session, prompt
 
 from .config import HarnessConfig
 
@@ -76,20 +76,25 @@ def load(path):
     return SavedSession.model_validate(data)
 
 
+@prompt(template="coding_harness/compact.j2", max_turns=1)
+async def summarize(history: list[dict], *, generated: str) -> str:
+    if not generated.strip():
+        raise ValueError("Compaction requires a nonempty summary without tool calls")
+    return generated
+
+
 async def compact(provider, messages, limit, *, before_request=None):
     # Keep the last complete assistant/tool exchange, so recent observations stay exact.
     starts = [i for i, message in enumerate(messages) if message["role"] == "assistant"]
     cut = starts[-1] if starts else 0
     if cut == 0:
         raise ValueError("Not enough conversation to compact")
-    prompt = Prompt("coding_harness/compact.j2")(history=messages[:cut])
-    if len(prompt) > limit:
+    context = await summarize.render(messages[:cut])
+    if len(context) > limit:
         raise ValueError("Summary input exceeds the context limit; start a new conversation")
     if before_request is not None:
         before_request()
-    summary, calls = await provider.acall(prompt, tools=[])
-    if calls or not summary.strip():
-        raise ValueError("Compaction requires a nonempty summary without tool calls")
+    summary = await summarize(messages[:cut], session=Session(provider=provider))
     replacement = [{"role": "user", "text": "Earlier conversation summary:\n" + summary}]
     replacement.extend(messages[cut:])
     if len(json.dumps(replacement, ensure_ascii=False)) > limit:

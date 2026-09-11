@@ -76,6 +76,18 @@ def test_compaction_preserves_recent_exchange_and_failure_preserves_messages(wor
     assert not agent.running
 
 
+def test_compaction_rejects_tool_requests_without_changing_messages():
+    messages = [
+        {"role": "user", "text": "Fix the bug"},
+        {"role": "assistant", "text": "Read the source"},
+    ]
+    original = deepcopy(messages)
+    provider = Script(("Summary", [call("create_file", {"path": "unexpected"})]))
+    with pytest.raises(ValueError, match="none were offered"):
+        asyncio.run(compact(provider, messages, 10000))
+    assert messages == original
+
+
 def test_changed_workspace_is_not_restored_as_verified(workspace, tmp_path):
     agent = CodingAgent(Script(), workspace, HarnessConfig())
     agent.fingerprint = asyncio.run(workspace.fingerprint())

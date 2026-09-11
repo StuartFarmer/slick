@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from pydantic import BaseModel, Field, constr
 
 from examples._cli import ScriptedProvider, parser, positive_int, provider_from_args
-from slick import Prompt, parse
+from slick import prompt
 
 NonemptyText = constr(strip_whitespace=True, min_length=1)
 
@@ -54,8 +54,6 @@ class ThoughtSearch:
         self.beam_width = beam_width
         self.breadth = breadth
         self.frontier = [ThoughtState(score=0.0)]
-        self.expand_prompt = Prompt("tree_of_thoughts/expand.j2")
-        self.evaluate_prompt = Prompt("tree_of_thoughts/evaluate.j2")
 
     def _context(self, node: ThoughtState) -> dict:
         return {
@@ -67,30 +65,22 @@ class ThoughtSearch:
     async def expand(self, node: ThoughtState) -> list[ThoughtState]:
         if node.answer is not None or len(node.steps) >= self.max_depth:
             return []
-        text = self.expand_prompt(
-            state=self._context(node),
-            breadth=self.breadth,
-            schema=Expansion.model_json_schema(),
-        )
-        response, _ = await self.provider.acall(text)
-        expansion = parse(response, Expansion)
-        if len(expansion.candidates) > self.breadth:
+        return await self.generate_children(node, provider=self.provider)
+
+    @prompt(template="tree_of_thoughts/expand.j2", output_type=Expansion)
+    async def generate_children(
+        self, node: ThoughtState, *, generated: Expansion
+    ) -> list[ThoughtState]:
+        if len(generated.candidates) > self.breadth:
             raise ValueError("expansion exceeds breadth")
         return [
             ThoughtState(steps=(*node.steps, item.step), answer=item.answer)
-            for item in expansion.candidates
+            for item in generated.candidates
         ]
 
-    async def evaluate(self, node: ThoughtState) -> ThoughtState:
-        text = self.evaluate_prompt(
-            state=self._context(node),
-            answer=node.answer,
-            criteria=["Satisfies the problem constraints", "Can lead to a correct complete answer"],
-            schema=Evaluation.model_json_schema(),
-        )
-        response, _ = await self.provider.acall(text)
-        evaluation = parse(response, Evaluation)
-        return replace(node, score=evaluation.score)
+    @prompt(template="tree_of_thoughts/evaluate.j2", output_type=Evaluation)
+    async def evaluate(self, node: ThoughtState, *, generated: Evaluation) -> ThoughtState:
+        return replace(node, score=generated.score)
 
     def select(self, candidates: list[ThoughtState]) -> list[ThoughtState]:
         """Keep the highest scores; equal scores preserve expansion order."""
@@ -111,7 +101,7 @@ class ThoughtSearch:
             candidates = []
             for node in self.frontier:
                 for child in await self.expand(node):
-                    candidates.append(await self.evaluate(child))
+                    candidates.append(await self.evaluate(child, provider=self.provider))
             if not candidates:
                 break
             self.select(candidates)

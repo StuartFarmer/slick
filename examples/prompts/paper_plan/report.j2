@@ -1,0 +1,56 @@
+# {{ plan.objective }}
+
+Paper-only assessment; no experiments or external sources were verified.
+
+{% for name, assessment in [("Method", method), ("Evaluation", evaluation)] %}
+## {{ name }}
+
+{{ assessment.summary }}
+
+Requirements:
+
+{% for item in assessment.requirements %}
+- {{ item }}
+{% endfor %}
+
+Evidence:
+
+{% for quote in assessment.evidence %}
+> {{ quote | replace('\n', '\n> ') }}
+
+{% endfor %}
+Questions:
+
+{% for question in assessment.questions %}
+- {{ question }}
+{% else %}
+- None listed.
+{% endfor %}
+
+{% endfor %}
+## Assumptions
+
+{% for assumption in plan.assumptions %}
+- {{ assumption }}
+{% else %}
+- None listed.
+{% endfor %}
+
+## Open questions
+
+{% for question in plan.questions %}
+- {{ question }}
+{% else %}
+- None listed.
+{% endfor %}
+
+## Tasks in order
+
+{% for task in plan.tasks %}
+### {{ loop.index }}. {{ task.description }}
+
+{% for criterion in task.acceptance %}
+- {{ criterion }}
+{% endfor %}
+
+{% endfor %}

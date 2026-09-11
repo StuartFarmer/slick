@@ -2,8 +2,8 @@
 
 `Prompt(template)(**variables)` and `render(template, **variables)` only
 render text. `parse(text, returns)`
-only validates a result. `@prompt(provider=...)` composes rendering,
-provider.call/acall, and parsing. Applications own persistence and retries.
+only validates a result. `@prompt` renders, calls a runtime provider, parses,
+and runs the function body as postprocessing. Applications own persistence and retries.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import json
 from collections.abc import Callable, Mapping
 from functools import wraps
 from pathlib import Path
-from typing import Any, get_type_hints
+from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 from pydantic import TypeAdapter
@@ -49,76 +49,113 @@ def parse(text: str, returns: Any = str) -> Any:
     return text if returns is str else TypeAdapter(returns).validate_json(text)
 
 
+def _render_prompt(prompt: Prompt, output_type: Any, variables: dict) -> str:
+    """Supply the output schema for provider and session prompt calls."""
+    if output_type is not None:
+        variables["schema"] = TypeAdapter(output_type).json_schema()
+    return prompt(**variables)
+
+
 def prompt(
     fn: Callable | None = None,
     *,
     template: str | None = None,
-    provider: Any = None,
+    output_type: Any = None,
 ) -> Callable:
-    """Render, call the supplied provider, and parse the annotated return type.
+    """Generate first, then run the body with optional keyword-only generated input.
 
-    Parsing failures propagate to the caller.
-    .render() runs the function body in its sync/async mode without provider calls.
+    Calls require provider=. output_type controls parsing, not the return annotation.
+    None or Ellipsis from the body passes the generated value through.
+    .render() renders inputs only; it never calls the provider or the body.
     """
     if fn is None:
-        return lambda inner: prompt(inner, template=template, provider=provider)
+        return lambda inner: prompt(inner, template=template, output_type=output_type)
     signature = inspect.signature(fn)
+    if "provider" in signature.parameters:
+        raise TypeError("provider is reserved for the call's execution provider")
+    generated_parameter = signature.parameters.get("generated")
+    if generated_parameter and generated_parameter.kind != inspect.Parameter.KEYWORD_ONLY:
+        raise TypeError("generated must be a keyword-only parameter")
+    inputs = signature.replace(
+        parameters=[p for name, p in signature.parameters.items() if name != "generated"]
+    )
     docstring = inspect.getdoc(fn)
-    returns = get_type_hints(fn).get("return", str)
-    adapter = None if returns is str else TypeAdapter(returns)
+    schema = None if output_type is None else TypeAdapter(output_type).json_schema()
     format_heading = "# Output Format"
     format_block = (
         f"{format_heading}\n\n"
         "Respond with ONLY a JSON value matching this schema — no preamble, no "
         "commentary, nothing outside the JSON.\n\n"
-        f"{json.dumps(adapter.json_schema(), indent=2)}\n"
-        if adapter is not None
+        f"{json.dumps(schema, indent=2)}\n"
+        if schema is not None
         else ""
     )
 
-    def render_context(arguments, extra):
-        context = dict(arguments)
-        if extra is not None:
-            context.update(extra)
+    def bind_inputs(args, kwargs):
+        for name in ("generated", "provider"):
+            if name in kwargs:
+                raise TypeError(f"{name} is reserved and cannot be supplied as template input")
+        bound = inputs.bind(*args, **kwargs)
+        bound.apply_defaults()
+        return bound
+
+    def render_context(bound):
+        context = dict(bound.arguments)
+        if "self" in context:
+            context["instance"] = context.pop("self")  # Jinja reserves self for its template.
+        if schema is not None:
+            context["schema"] = schema
         context.setdefault("output_format", format_block)
         text = _render(template, docstring, context)
         if format_block and format_heading not in text:
             text = f"{text}\n\n---\n\n{format_block}"
         return text
 
-    def parse_response(response):
-        text, requests = response
-        if requests:
-            raise PromptError(
-                "This prompt expects final text; handle tool requests in application code."
-            )
-        return text if adapter is None else adapter.validate_json(text)
-
     if inspect.iscoroutinefunction(fn):
 
         async def render_call(*args, **kwargs):
-            bound = signature.bind(*args, **kwargs)
-            bound.apply_defaults()
-            extra = await fn(*bound.args, **bound.kwargs)
-            return render_context(bound.arguments, extra)
+            return render_context(bind_inputs(args, kwargs))
 
         @wraps(fn)
-        async def call(*args, **kwargs):
-            text = await render_call(*args, **kwargs)
-            return parse_response(await provider.acall(text))
+        async def call(*args, provider, **kwargs):
+            bound = bind_inputs(args, kwargs)
+            text, _ = await provider.acall(render_context(bound))
+            generated = parse(text, str if output_type is None else output_type)
+            injected = {"generated": generated} if generated_parameter else {}
+            result = await fn(*bound.args, **bound.kwargs, **injected)
+            return generated if result is None or result is Ellipsis else result
     else:
 
         def render_call(*args, **kwargs):
-            bound = signature.bind(*args, **kwargs)
-            bound.apply_defaults()
-            extra = fn(*bound.args, **bound.kwargs)
-            return render_context(bound.arguments, extra)
+            return render_context(bind_inputs(args, kwargs))
 
         @wraps(fn)
-        def call(*args, **kwargs):
-            text = render_call(*args, **kwargs)
-            return parse_response(provider.call(text))
+        def call(*args, provider, **kwargs):
+            bound = bind_inputs(args, kwargs)
+            text, _ = provider.call(render_context(bound))
+            generated = parse(text, str if output_type is None else output_type)
+            injected = {"generated": generated} if generated_parameter else {}
+            result = fn(*bound.args, **bound.kwargs, **injected)
+            return generated if result is None or result is Ellipsis else result
 
+    parameters = list(inputs.parameters.values())
+    index = next(
+        (
+            i
+            for i, parameter in enumerate(parameters)
+            if parameter.kind == inspect.Parameter.VAR_KEYWORD
+        ),
+        len(parameters),
+    )
+    parameters.insert(
+        index, inspect.Parameter("provider", inspect.Parameter.KEYWORD_ONLY, annotation=Any)
+    )
+    call.__signature__ = inputs.replace(parameters=parameters)
+    call.__annotations__ = {
+        name: annotation for name, annotation in fn.__annotations__.items() if name != "generated"
+    }
+    call.__annotations__["provider"] = Any
+    render_call.__signature__ = inputs.replace(return_annotation=str)
     call.render = render_call
     return call
 

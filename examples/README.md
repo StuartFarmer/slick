@@ -22,12 +22,137 @@ example independently:
 | ReAct | `python -m examples.react --max-steps 4` | `Researcher.step`, `run`; selected actions, Python tools, actual observations |
 | Reflexion | `python -m examples.reflexion --attempts 3` | `ReflectiveSolver.attempt`, `evaluate`, `reflect`, `run`; checker feedback and retained lessons |
 | Tree of Thoughts | `python -m examples.tree_of_thoughts --depth 2 --width 2 --breadth 2` | `ThoughtSearch.expand`, `evaluate`, `select`, `run`; bounded beam search |
+| Paper to plan | `python -m examples.paper_plan` | Explicit assessments, ordered tasks, and feedback-driven revision |
 
 The default `--provider demo` uses canned responses and requires no credentials.
 Templates, validation, state changes, tool execution, and loops still run. Canned
 answers demonstrate the default tasks; changing the task does not make the demo
 responses intelligent. Use `--help` on each module to see its input and budget flags.
 The earlier functional example remains available as `python -m examples.core`.
+
+## OCR paper to implementation plan
+
+Run the fictional paper with canned responses, without credentials:
+
+```bash
+python -m examples.paper_plan
+```
+
+Analyze your own UTF-8 OCR Markdown using a real provider:
+
+```bash
+python -m examples.paper_plan /path/to/paper.md --provider openai --model YOUR_MODEL_ID > plan.md
+```
+
+[paper_plan.py](paper_plan.py) has four explicit operations, each using its own Jinja
+prompt declared with `@prompt`. Each call generates before running its Python body:
+
+1. `assess_method()` identifies implementation requirements and missing information.
+2. `assess_evaluation()` identifies claims, baselines, and measurements.
+3. `generate_plan(method, evaluation)` drafts an ordered list of tasks with acceptance criteria.
+4. `revise(draft, feedback, provider=...)` returns a new plan using the original assessments and your feedback.
+
+`run()` runs both assessments concurrently, waits for them, then generates the plan:
+three model calls in total. The provider must support concurrent calls. Each assessment
+contains source quotations, which Python checks against the supplied paper. Missing
+information stays visible as plain questions; proposed choices are listed as assumptions.
+Tasks are an ordered list, with no IDs, routes, or dependency graph.
+
+```python
+from pathlib import Path
+from slick import prompts
+from examples.paper_plan import PaperPlanner, format_report
+
+prompts.TEMPLATE_ROOT = Path("examples/prompts")
+paper = Path("paper.md").read_text(encoding="utf-8")
+planner = PaperPlanner(paper, provider)
+
+draft = await planner.run()
+print(format_report(draft))
+
+# After reviewing the draft, make one explicit revision call.
+revised = await planner.revise(
+    draft, "Separate data preparation from model fitting.", provider=provider,
+)
+print(format_report(revised))
+```
+
+Direct calls to any decorated method require `provider=`; `run()` passes the planner's
+current provider to each step. Function bodies check generated evidence or wrap the
+generated plan. Revision uses `@validate_call` to reject blank feedback before generation
+and preserves the original draft. Provider errors, invalid JSON, and invalid
+quotations propagate to the caller. Pydantic validates the output structure; it does
+not establish scientific correctness or plan completeness. Your application decides
+whether to retry, approve, or save a result with `result.model_dump()`.
+
+The shared `--provider`, `--model`, and `--timeout` options work as above. The example
+reads the entire paper, so it must fit the model's context window. It does not browse
+links or execute experiments. CLI providers retain their own harness capabilities,
+although these prompts request paper-only analysis. The offline demo contains only
+the three initial responses; use a real provider for revisions or your own paper.
+
+### External review
+
+Pass a SQLite inbox path to pause after generation:
+
+```bash
+python -m examples.paper_plan --inbox reviews.db
+```
+
+The example awaits `inbox.request(draft, output_type=ReviewDecision)`. A CLI,
+webhook, or API adapter discovers drafts through the same database file:
+
+```python
+from slick import Inbox
+from examples.paper_plan import PaperPlan, ReviewDecision, format_report
+
+inbox = Inbox("reviews.db")
+for channel, message in inbox.pending():
+    draft = PaperPlan.model_validate(message)
+    print(format_report(draft))
+    decision = ReviewDecision.model_validate_json(input("Decision JSON: "))
+    inbox.send(channel, decision)
+```
+
+Decisions are `{"action": "approve"}`, `{"action": "reject"}`, or
+`{"action": "revise", "feedback": "Separate preparation from fitting."}`.
+Revision requires nonblank feedback and a real provider (or additional scripted
+responses). Each revision publishes a new draft on a new channel, discoverable on
+the next call to `pending()`. Approval returns the current plan; rejection exits with status 1.
+Invalid decisions and model errors propagate. The inbox itself accepts any JSON;
+`ReviewDecision` and the loop belong entirely to this example.
+
+In application code, call `await planner.review(draft, inbox)` after `planner.run()`.
+Listing requests does not consume them; they remain discoverable until a reply is
+sent. `pending()` is a snapshot, so multiple reviewers can see the same draft.
+Identical duplicate submissions are harmless; conflicting replies are rejected.
+Invalid typed replies reopen the request and propagate a validation error. Reviewer
+assignment belongs to the adapter.
+
+### Restart recovery
+
+Add a stable run ID to record execution and recover after a process restart:
+
+```bash
+python -m examples.paper_plan --inbox reviews.db --run-id paper-42
+```
+
+Run that same command again to recover. The CLI orchestration and `review()` use
+`@workflow`; the ordinary calls and loop stay intact. Completed generation and
+revision results are restored as `PaperPlan` objects. An unanswered review reconnects
+to its existing channel, and a reply sent while the planner was stopped is retained.
+Without `--run-id`, each invocation starts a new plan.
+
+The initial `planner.run()` is one recorded operation, including its concurrent
+assessments. A failure inside that operation before its result is saved can repeat
+all three initial calls. Once the draft is recorded, restarting at a review point
+does not regenerate it. Each subsequent revision and review request is recorded
+separately. Code between recorded awaits executes again and must be deterministic.
+
+The paper is saved as a run input and must match on recovery. Supply providers again;
+their live clients are not serialized. Use a new run ID after changing the paper,
+workflow, or prompt templates. Two processes cannot own the same run concurrently.
+The inbox database and its adjacent `.locks` directory must remain on local storage.
 
 ## Coding harness
 

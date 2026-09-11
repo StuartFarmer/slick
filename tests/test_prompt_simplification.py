@@ -39,9 +39,13 @@ def test_model_is_template_data_and_calls_have_no_implicit_side_effects(
         """{{ model }}"""
 
     provider = Provider()
-    fn = prompt(provider=provider)(async_declaration if asynchronous else declaration)
+    fn = prompt(async_declaration if asynchronous else declaration)
     for _ in range(2):
-        assert (asyncio.run(fn(model="data")) if asynchronous else fn(model="data")) == "data"
+        assert (
+            asyncio.run(fn(model="data", provider=provider))
+            if asynchronous
+            else fn(model="data", provider=provider)
+        ) == "data"
     assert provider.calls == 2
     assert not (tmp_path / "logs").exists()
 

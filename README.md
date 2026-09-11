@@ -8,8 +8,9 @@ from slick.providers import OpenAIAPI
 
 provider = OpenAIAPI(model="YOUR_MODEL_ID")
 answer_prompt = Prompt("answer.j2")
-text = answer_prompt(question="How does authentication work?", documents=documents)
-answer, _ = await provider.acall(text)
+answer, _ = await provider.aprompt(
+    answer_prompt, question="How does authentication work?", documents=documents,
+)
 ```
 
 Prompts render arguments into text. Providers execute text and return responses.
@@ -70,6 +71,36 @@ is stripped from the rendered prompt. Provider response text is returned unchang
 `parse` accepts Pydantic-compatible types and raises `pydantic.ValidationError`
 for invalid structured output. Structured responses must be JSON, including quoted
 JSON strings for string literals. It never calls a provider or repairs output.
+
+For a single call, providers also combine rendering, execution, and parsing:
+
+```python
+from slick import Prompt
+
+# prompts/numbers.j2: Extract numbers from {{ document }} as JSON: {{ schema | tojson }}
+numbers, tool_requests = await provider.aprompt(
+    Prompt("numbers.j2"), output_type=list[int], document=document,
+)
+numbers, tool_requests = provider.prompt(  # Synchronous equivalent; a separate call.
+    Prompt("numbers.j2"), output_type=list[int], document=document,
+)
+```
+
+`output_type=None` is the default: text is returned unchanged, with no schema
+injection or parsing. A supplied type provides the template's `schema` variable
+and uses `parse(text, output_type)` on the response. Templates choose where to
+include the schema; raw calls to templates requiring it must supply `schema=`.
+
+Provider prompting performs one call, returns `(result, tool_requests)`, and
+keeps no interaction history or pending tool work. Requests pass through even
+when no tools were offered. Optional `tools=` and `tool_results=` are forwarded
+to the provider's `call`/`acall`; other keyword arguments are template inputs.
+Rendering, provider, and parsing errors propagate without retries. Use a
+`Session` when you want interaction history and tool bookkeeping.
+
+All built-in providers inherit these methods. Custom providers can inherit
+`slick.Provider` and implement `call` for sync prompting or `acall` for async
+prompting, accepting the same optional tool arguments.
 
 ## Reusable prompts and application classes
 
@@ -214,6 +245,42 @@ Use Jinja to render whichever observations your application needs. Recorded
 `exchange["context"]` is the full prompt already sent, so don't recursively insert
 those prompts into future ones.
 
+Use `aprompt()` to render a `Prompt`, call the session's provider, and optionally
+parse the response in one step:
+
+```python
+from pydantic import BaseModel
+from slick import Prompt
+
+class Assessment(BaseModel):
+    summary: str
+
+# prompts/assess.j2: Assess {{ paper }}. Return JSON matching {{ schema | tojson }}.
+assessment, tool_requests = await session.aprompt(
+    Prompt("assess.j2"), output_type=Assessment, paper=paper,
+)
+
+# prompts/summarize.j2: Summarize {{ paper }}.
+text, tool_requests = await session.aprompt(Prompt("summarize.j2"), paper=paper)
+
+# Synchronous equivalent; uses provider.call directly.
+assessment, tool_requests = session.prompt(
+    Prompt("assess.j2"), output_type=Assessment, paper=paper,
+)
+```
+
+Both methods return `(result, tool_requests)` and accept a per-call `provider=`
+override. `output_type=None` is the default: response text is returned unchanged,
+with no schema injection or parsing. A supplied type generates the template's
+`schema` variable and parses using `parse(text, output_type)`; templates choose
+where to include the schema. A raw call to a template requiring `schema` must
+supply it explicitly. Types supported by `parse`, such as Pydantic models and
+`list[int]`, work here too.
+
+History retains the rendered context and raw response, including when parsing
+fails. Tool requests remain pending for the caller to resolve or cancel; neither
+method executes them. Ready tool results are submitted just as with `acall()`.
+
 | Property | Contents |
 | --- | --- |
 | `history` | Detached exchange dictionaries containing `context`, `text`, and `work` |
@@ -265,19 +332,20 @@ are not serialized. Save between operations, including between tools in a batch.
 This does not guarantee exactly-once external effects across a crash before a
 tool's result is recorded.
 
-Session is asynchronous and allows one operation at a time per instance. Sync
-tools run inline as they do with `Tool.ainvoke`; concurrency and process pools
-remain future additions. Provider clients belong to the application, and Session
-does not close them. Raw `provider.call/acall` remains available independently.
+Session allows one operation at a time per instance. `prompt()` is synchronous;
+`aprompt()`, `acall()`, and tool resolution are asynchronous. Sync tools run inline
+as they do with `Tool.ainvoke`; concurrency and process pools remain future
+additions. Provider clients belong to the application, and Session does not close
+them. Raw `provider.call/acall` remains available independently.
 
 Run the complete offline example with `python -m examples.session`, or see the
 [coding harness](examples/coding_harness/README.md) for budgets, verification and a TUI.
 
 ## Executing decorator
 
-The lowercase `@prompt` decorator combines rendering, execution and parsing.
-Supply a configured `provider=` to execute it. Use uppercase `Prompt` for a
-provider-independent renderer.
+`@prompt` renders the function inputs, calls the provider, parses the response,
+then executes the function body. Supply `provider=` on every call; the decorator
+never stores or selects a provider implicitly.
 
 ```python
 from pydantic import BaseModel
@@ -287,43 +355,72 @@ class Summary(BaseModel):
     headline: str
     points: list[str]
 
-@prompt(provider=provider, template="summarize.j2")
-async def summarize(document: str, audience: str = "an engineer") -> Summary:
-    """Summarize a document for one audience."""
+@prompt(template="summarize.j2", output_type=Summary)
+async def summarize(document: str, *, generated: Summary) -> str:
+    """Generate a summary, then format it for display."""
+    return f"{generated.headline}: {len(generated.points)} points"
 
-summary = await summarize(document)
-print(summary.headline)
+text = await summarize(document, provider=model)
+text = await summarize(document, provider=another_model)
 ```
 
 ```jinja
 {# prompts/summarize.j2 #}
-Summarize this document for {{ audience }}:
+Summarize this document:
 {{ document }}
 
 {{ output_format }}
 ```
 
-Parameters and defaults supply template variables. The return annotation supplies
-the output contract. `str` requests plain text; other types add JSON instructions
-through `{{ output_format }}` (appended if omitted) and are validated locally.
-This release uses prompt instructions and local validation, not provider-native
-constrained decoding. Invalid results raise Pydantic's `ValidationError` directly.
-The application owns retries and repairs.
+`output_type` describes the model output, independently of the function's return
+annotation. Its default, `None`, leaves response text unchanged. A supplied type
+provides `schema` and JSON instructions through `output_format` (appended if omitted),
+and validates the JSON using `parse`. This uses prompt instructions and local
+validation, not provider-native constrained decoding.
 
-A `def` declaration uses `provider.call`; an `async def` declaration uses
-`provider.acall`. Unsupported modes fail clearly; Slick never runs a blocking
-provider in a hidden thread or starts an event loop for you.
+Declare `generated` as a keyword-only parameter to receive that output in the body.
+The caller never supplies it. The body can return a different type, validate the
+result, or perform other Python work. Returning `None` or `Ellipsis` passes through
+the generated value, so a body consisting of `...`, `pass`, or only a docstring works:
 
 ```python
-text = await summarize.render(document)  # render without provider execution
+@prompt
+async def answer(question: str) -> str:
+    """Answer this question: {{ question }}"""
+    ...
+
+text = await answer("What is a closure?", provider=model)
 ```
 
-For sync declarations, `.render(...)` is synchronous. A named template leaves
-the docstring free for documentation. Omit `template=` to use the docstring as
-the Jinja template. Computed-context bodies returning a mapping remain supported;
-an async body is awaited, including during `.render()`. Prefer ordinary Python
-functions around `render` and `call`/`acall` when you want explicit preparation
-or postprocessing.
+Tool requests are discarded by the decorator. Use `provider.prompt/aprompt` or
+`Session.prompt/aprompt` when you need `(result, tool_requests)`. Provider and parsing
+failures skip the body; body errors also propagate. Nothing retries automatically.
+For input validation before generation, put Pydantic's `@validate_call` outside
+`@prompt`, as shown in [paper_plan.py](examples/paper_plan.py).
+
+Ordinary parameters and defaults become template data. `provider` and `generated`
+are reserved. Bound methods work normally; templates access the bound `self` as
+`instance`, because Jinja reserves `self` for its template object. For example,
+`{{ instance.paper }}` reads a planner's paper, and `{{ draft.plan.model_dump() | tojson }}`
+serializes a supplied draft. Calling a method still requires an explicit provider:
+
+```python
+revised = await planner.revise(draft, feedback, provider=model)
+```
+
+A `def` uses `provider.call`; an `async def` uses `provider.acall` and awaits the
+postprocessing body. Unsupported modes fail; Slick does not start an event loop
+or run a blocking provider in a hidden thread.
+
+```python
+text = await summarize.render(document)  # No provider or body execution.
+```
+
+For sync declarations, `.render(...)` is synchronous. A named template leaves the
+docstring free for documentation; omit `template=` to use the docstring as Jinja.
+The body no longer supplies template variables: put computations in the template
+or calculate them before calling the function. Existing decorators should move
+`provider=` to the call and declare `output_type=` explicitly for structured output.
 
 ## Providers
 
@@ -590,7 +687,7 @@ an explicit provider/tool loop. Run its offline demo with
 
 ## Execution and persistence
 
-`@prompt` renders, calls the supplied `provider=`, and validates the response.
+`@prompt` renders, calls the per-call `provider=`, parses the response, and runs the body.
 Applications own caching, logging, output files, and retries. Custom providers only
 need `call` or `acall`; the decorator does not require `identity()`.
 
@@ -598,7 +695,8 @@ The decorator no longer accepts `cache=` or `log_dir=`, and `LOG_DIR` is removed
 `output` is now an ordinary template argument, with no file-writing behavior.
 The `.source()`, `.template_name`, and `.returns` inspection attributes are also
 removed; `.render()` remains available, and the wrapped function retains its
-annotations and docstring.
+return annotation and docstring. Its public signature includes the required
+`provider=` argument and excludes the injected `generated` argument.
 
 For file output, write the returned string in application code, or serialize a
 typed result explicitly. To preserve a model's exact JSON text, use
@@ -607,6 +705,153 @@ after validation.
 
 Template errors, bad function arguments, and missing provider methods propagate
 directly from Jinja or Python.
+
+## Async input channels
+
+For a request and reply, publish a message and await the response in one call:
+
+```python
+from slick import Inbox
+
+inbox = Inbox("messages.db")
+response = await inbox.request({"draft": "A proposed plan"})
+```
+
+Another process discovers unanswered requests through the same database:
+
+```python
+inbox = Inbox("messages.db")
+for channel, draft in inbox.pending():
+    inbox.send(channel, {"feedback": "Add a verification step"})
+```
+
+Pass `output_type=YourModel` to `request()` to validate its reply with Pydantic.
+The default, `None`, returns decoded JSON unchanged. `pending()` returns a snapshot
+of `(reply_endpoint, message)` pairs, oldest first, without consuming or claiming
+them. Ordinary channel messages and replies are excluded. A request disappears from
+the list when its first reply is sent, even if the waiting caller has not received it
+yet. Validate external replies before sending; validation failures in `request()`
+retain the rejected response and error, reopen the request, and propagate to the caller.
+The first response submission wins atomically. Resending identical JSON is harmless;
+a conflicting second reply raises `ValueError`.
+
+For explicit recovery, pass a stable key:
+
+```python
+response = await inbox.request(draft, key="paper-42:review:0", output_type=ReviewDecision)
+```
+
+Calling again with the same key reconnects to the original request or returns its
+retained response. Different message content under that key raises `ValueError`.
+Use the same output type when reconnecting. Without a key, each call creates a fresh
+request. Replies and the latest rejected submission are retained; automatic expiration
+and cleanup are not implemented.
+
+Multiple readers can see the same request; `pending()` does not assign exclusive
+ownership. Cancellation or a timeout leaves the published request discoverable.
+An adapter can expose `pending()` and `send()` through an API without provider or
+review logic in the inbox.
+
+For longer conversations, the channel primitives remain available:
+
+`Inbox` stores JSON messages in a local SQLite file. Each channel has two endpoints;
+`send` writes to the opposite endpoint, and `recv` waits for incoming messages in FIFO
+order. Sending a draft and then waiting cannot receive that same draft back.
+
+```python
+from slick import Inbox
+
+inbox = Inbox("messages.db")
+channel = inbox.new_channel()
+reviewer_channel = inbox.peer(channel)  # Give this address to the other participant.
+
+inbox.send(channel, {"draft": "A proposed plan"})
+response = await inbox.recv(channel)
+```
+
+In another coroutine or process using the same database file:
+
+```python
+inbox = Inbox("messages.db")
+draft = await inbox.recv(reviewer_channel)
+inbox.send(reviewer_channel, {"feedback": "Add a verification step"})
+```
+
+`new_channel()` and `send()` are synchronous; `recv()` is asynchronous. Messages can
+be JSON values or Pydantic models; received values are decoded JSON, so applications
+validate their own types. Webhook, CLI, and API adapters all write through `send`.
+The inbox has no review-specific states or provider dependency.
+
+Queued messages survive reopening the database and are consumed once by one receiver.
+Receiving removes the message; there is no acknowledgement or automatic redelivery
+if processing subsequently fails. Cancellation while waiting does not consume a
+message; use `asyncio.wait_for(inbox.recv(channel), timeout)` for a deadline.
+Persist channel addresses and application state yourself to resume after a restart.
+
+This implementation uses short SQLite transactions and polls every 0.1 seconds
+(`poll_interval` is configurable). It supports local processes sharing a database
+file; it is not a network transport. See the [paper review example](examples/README.md#external-review)
+for application-level review decisions.
+
+## Durable workflows
+
+`@workflow` instruments awaited calls in an ordinary async function. A `Workflow`
+context enables recording and replay; outside that context the original function
+executes normally.
+
+```python
+from slick import Inbox, Workflow, workflow
+from examples.paper_plan import PaperPlan, PaperPlanner
+
+@workflow
+async def plan_and_review(planner, inbox) -> PaperPlan | None:
+    draft = await planner.run()
+    return await planner.review(draft, inbox)
+
+inbox = Inbox("workflows.db")
+planner = PaperPlanner(paper, provider)
+async with Workflow("workflows.db", run_id="paper-42", inputs={"paper": paper}):
+    result = await plan_and_review(planner, inbox)
+```
+
+After a restart, supply the runtime dependencies again and execute the same entry
+function with the same database path, run ID and business inputs. Python runs the
+branches and loops again. Completed awaited calls return saved results; unfinished
+calls execute. Inbox requests receive stable keys automatically, so they reconnect
+to existing review requests or retained replies. Each loop occurrence has its own
+execution identity. No `run.step()` calls or application checkpoint models are needed.
+
+Awaited functions use their return annotations to restore typed results, including
+Pydantic models. Unannotated functions may return only JSON-native values. An inbox
+request uses its `output_type` instead. Results are serialized and reconstructed;
+object identity and mutations to supplied objects, including `Session` history,
+are not restored.
+
+The initial subset supports assignments, expressions, `if`, ordinary `for`/`while`
+loops, `break`, `continue`, `return`, `raise`, and direct awaited async function calls.
+Source must be available. Nested definitions, comprehensions, generators,
+`try`/`with`, async iteration, nested await expressions and other unsupported
+constructs raise `WorkflowError`. Place `@workflow` directly above the function,
+with any other decorators above it.
+
+Instrumented execution is sequential. For parallel work, await an ordinary async
+helper that uses `asyncio.gather` internally; its final result is one checkpoint.
+The paper planner uses this for its initial assessments and generation. A failure
+before that helper completes can repeat the whole helper. Nested `@workflow`
+functions provide finer sequential checkpoints, as in the review loop.
+
+Code and argument expressions between recorded calls execute again and must be
+deterministic. Put external effects inside awaited operations; an operation interrupted
+before its result is saved may still execute again, so effects that must not repeat
+need their own idempotency support. This is replay, not restoration of a Python frame.
+
+Changed run inputs, workflow source, or recorded output schemas are rejected. Use a
+new run ID for changed workflows; `version=` also identifies the intended dependency
+version. Changes to templates, helpers, resources, or other external dependencies
+require an explicit new run/version policy rather than automatic migration.
+Only one local worker may own a run at a time. SQLite lock files beside the database
+release their locks on process death while leaving the inbox writable. Journal and
+lock files are retained; this implementation has no distributed scheduler or cleanup job.
 
 ## Examples
 

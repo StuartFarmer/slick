@@ -2,11 +2,12 @@
 
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import AfterValidator, ConfigDict, TypeAdapter
 from typing_extensions import TypedDict
 
+from .prompts import Prompt, _render_prompt, parse
 from .tools import Tool, ToolError, ToolRequest, ToolResult, prepare_tools
 
 SNAPSHOT_CONFIG = ConfigDict(strict=True, extra="forbid", hide_input_in_errors=True)
@@ -75,8 +76,8 @@ async def _invoke(request, tools):
 class Session:
     """Own interaction history and tool work; the application supplies context.
 
-    Operations are asynchronous and sequential per instance. Supplied providers
-    and Python functions remain application-owned resources.
+    Operations are sequential per instance; prompt() supports synchronous calls.
+    Supplied providers and Python functions remain application-owned resources.
     """
 
     def __init__(self, *, provider=None, tools=None):
@@ -132,29 +133,62 @@ class Session:
         or resolve_pending. A provider override applies to this call only.
         """
         with self._operation():
-            selected = self._provider if provider is None else provider
-            if selected is None:
-                raise ValueError("Supply a provider to Session or acall")
-            if any(work["result"] is None for work in self._work):
-                raise ValueError("Resolve or cancel pending requests before calling a provider")
-            results = self.ready_results
-            text, requests = await selected.acall(context, tools=self.tools, tool_results=results)
-            requests = deepcopy(requests)
-            if requests and not self._tools:
-                raise ValueError("Provider requested tools when none were offered")
-            for work in self._work:
-                work["submitted"] = True
-            self._history.append(
-                {
-                    "context": context,
-                    "text": text,
-                    "work": [
-                        {"request": request, "result": None, "submitted": False}
-                        for request in requests
-                    ],
-                }
+            selected = self._prepare_call(provider)
+            response = await selected.acall(
+                context, tools=self.tools, tool_results=self.ready_results
             )
-            return text, deepcopy(requests)
+            return self._record_response(context, response)
+
+    async def aprompt(
+        self, prompt: Prompt, /, *, output_type: Any = None, provider=None, **variables
+    ) -> tuple[Any, list[dict]]:
+        """Render, call asynchronously, and return (parsed output or raw text, requests).
+
+        output_type supplies the template's schema variable and the parse type.
+        None leaves text and template variables unchanged. The raw exchange is
+        recorded before parsing; validation failures leave tool work accessible.
+        Requests are never executed or cancelled automatically.
+        """
+        context = _render_prompt(prompt, output_type, variables)
+        text, requests = await self.acall(context, provider=provider)
+        return parse(text, str if output_type is None else output_type), requests
+
+    def prompt(
+        self, prompt: Prompt, /, *, output_type: Any = None, provider=None, **variables
+    ) -> tuple[Any, list[dict]]:
+        """Like aprompt(), using provider.call directly without an event loop."""
+        context = _render_prompt(prompt, output_type, variables)
+        with self._operation():
+            selected = self._prepare_call(provider)
+            response = selected.call(context, tools=self.tools, tool_results=self.ready_results)
+            text, requests = self._record_response(context, response)
+        return parse(text, str if output_type is None else output_type), requests
+
+    def _prepare_call(self, provider):
+        selected = self._provider if provider is None else provider
+        if selected is None:
+            raise ValueError("Supply a provider to Session or the call")
+        if any(work["result"] is None for work in self._work):
+            raise ValueError("Resolve or cancel pending requests before calling a provider")
+        return selected
+
+    def _record_response(self, context, response):
+        text, requests = response
+        requests = deepcopy(requests)
+        if requests and not self._tools:
+            raise ValueError("Provider requested tools when none were offered")
+        for work in self._work:
+            work["submitted"] = True
+        self._history.append(
+            {
+                "context": context,
+                "text": text,
+                "work": [
+                    {"request": request, "result": None, "submitted": False} for request in requests
+                ],
+            }
+        )
+        return text, deepcopy(requests)
 
     async def _resolve(self, work):
         if work["result"] is None:

@@ -21,8 +21,8 @@ def test_decode_uses_standard_json_semantics():
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_prompt_does_not_accept_text_with_pending_requests(asynchronous):
-    from slick import PromptError, prompt
+def test_prompt_discards_tool_requests(asynchronous):
+    from slick import prompt
 
     class Provider:
         calls = 0
@@ -42,7 +42,7 @@ def test_prompt_does_not_accept_text_with_pending_requests(asynchronous):
     async def async_declaration() -> str:
         """Answer the question."""
 
-    answer = prompt(provider=provider)(async_declaration if asynchronous else declaration)
-    with pytest.raises(PromptError, match="tool requests"):
-        asyncio.run(answer()) if asynchronous else answer()
+    answer = prompt(async_declaration if asynchronous else declaration)
+    result = asyncio.run(answer(provider=provider)) if asynchronous else answer(provider=provider)
+    assert result == "answer"
     assert provider.calls == 1

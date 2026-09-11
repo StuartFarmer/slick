@@ -85,27 +85,27 @@ def test_prompt_object_renders_lazily_with_execution_options_as_template_data(ro
 def test_provider_calls_do_not_implicitly_cache_log_or_rewrite(root, capsys):
     provider = FakeProvider("  answer\n")
 
-    @slick.prompt(provider=provider)
-    def answer(question: str, provider: str = "context") -> str:
-        """{{ question }} / {{ provider }}"""
+    @slick.prompt()
+    def answer(question: str, note: str = "context") -> str:
+        """{{ question }} / {{ note }}"""
 
-    assert answer("why") == "  answer\n"
-    assert answer("why") == "  answer\n"
+    assert answer("why", provider=provider) == "  answer\n"
+    assert answer("why", provider=provider) == "  answer\n"
     assert provider.calls == ["why / context", "why / context"]
     assert not (root / "logs").exists()
     assert capsys.readouterr() == ("", "")
-    assert str(inspect.signature(answer)) == "(question: str, provider: str = 'context') -> str"
+    assert inspect.signature(answer).parameters["provider"].kind == inspect.Parameter.KEYWORD_ONLY
 
 
 def test_invalid_output_is_not_repaired_and_preserves_response(root):
     provider = FakeProvider("invalid")
 
-    @slick.prompt(provider=provider)
+    @slick.prompt(output_type=Summary)
     def summarize(document: str) -> Summary:
         """{{ document }}\n{{ output_format }}"""
 
     with pytest.raises(ValidationError) as caught:
-        summarize("data")
+        summarize("data", provider=provider)
     assert caught.value.errors()[0]["input"] == "invalid"
     assert len(provider.calls) == 1
     assert provider.calls[0].count("# Output Format") == 1
@@ -118,15 +118,17 @@ def test_async_functions_render_and_execute_without_hidden_sync_calls(root):
             await asyncio.sleep(0)
             return ('{"headline":"' + text.splitlines()[0] + '", "points":[]}', [])
 
-    @slick.prompt(provider=AsyncOnly())
-    async def summarize(document: str) -> Summary:
-        """{{ document }} {{ count }}"""
+    @slick.prompt(output_type=Summary)
+    async def summarize(document: str, *, generated: Summary) -> Summary:
+        """{{ document }}"""
         await asyncio.sleep(0)
-        return {"count": len(document)}
+        return generated.model_copy(update={"headline": f"{generated.headline} {len(document)}"})
 
     async def run():
-        assert (await summarize.render("abc")).startswith("abc 3")
-        return await asyncio.gather(summarize("abc"), summarize("xy"))
+        assert (await summarize.render("abc")).splitlines()[0] == "abc"
+        return await asyncio.gather(
+            summarize("abc", provider=AsyncOnly()), summarize("xy", provider=AsyncOnly())
+        )
 
     results = asyncio.run(run())
     assert [r.headline for r in results] == ["abc 3", "xy 2"]
@@ -147,11 +149,11 @@ def test_async_cancellation_reaches_provider(root):
                 finally:
                     cancelled.set()
 
-        @slick.prompt(provider=Waiting())
+        @slick.prompt()
         async def answer(question: str) -> str:
             """{{ question }}"""
 
-        task = asyncio.create_task(answer("why"))
+        task = asyncio.create_task(answer("why", provider=Waiting()))
         await entered.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -165,23 +167,23 @@ def test_provider_selection_is_explicit_and_unsupported_async_fails(root):
     with pytest.raises(TypeError, match="model"):
         slick.prompt(model=FakeProvider(), provider=FakeProvider())(lambda: None)
 
-    @slick.prompt(provider=FakeProvider())
+    @slick.prompt()
     def answer(question: str) -> str:
         """{{ question }}"""
 
     with pytest.raises(TypeError, match="model"):
-        answer("x", model=FakeProvider())
+        answer("x", model=FakeProvider(), provider=FakeProvider())
 
     class SyncOnly:
         def call(self, text):
             raise AssertionError("sync call must not be attempted")
 
-    @slick.prompt(provider=SyncOnly())
+    @slick.prompt()
     async def async_answer(question: str) -> str:
         """{{ question }}"""
 
     with pytest.raises(AttributeError, match="acall"):
-        asyncio.run(async_answer("x"))
+        asyncio.run(async_answer("x", provider=SyncOnly()))
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -199,11 +201,11 @@ def test_caller_owns_retries_after_parse_failure(root, asynchronous):
     async def async_declaration() -> list[int]:
         """Numbers"""
 
-    fn = slick.prompt(provider=provider)(async_declaration if asynchronous else declaration)
+    fn = slick.prompt(output_type=list[int])(async_declaration if asynchronous else declaration)
     with pytest.raises(ValidationError):
-        asyncio.run(fn()) if asynchronous else fn()
+        asyncio.run(fn(provider=provider)) if asynchronous else fn(provider=provider)
     assert len(provider.calls) == 1
-    assert (asyncio.run(fn()) if asynchronous else fn()) == [1, 2]
+    assert (asyncio.run(fn(provider=provider)) if asynchronous else fn(provider=provider)) == [1, 2]
     assert len(provider.calls) == 2
     assert provider.calls[0] == provider.calls[1]
     assert not (root / "logs").exists()
@@ -220,9 +222,13 @@ def test_output_is_template_data_without_file_writes(tmp_path, monkeypatch, asyn
     async def async_declaration(output: str) -> str:
         """Write {{ output }}"""
 
-    fn = slick.prompt(provider=provider)(async_declaration if asynchronous else declaration)
+    fn = slick.prompt(async_declaration if asynchronous else declaration)
     for _ in range(2):
-        result = asyncio.run(fn(output="report.md")) if asynchronous else fn(output="report.md")
+        result = (
+            asyncio.run(fn(output="report.md", provider=provider))
+            if asynchronous
+            else fn(output="report.md", provider=provider)
+        )
         assert result == "  answer\n"
     assert provider.calls == ["Write report.md", "Write report.md"]
     assert list(tmp_path.iterdir()) == []

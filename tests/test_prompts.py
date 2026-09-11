@@ -116,7 +116,7 @@ class TemplateFiles(Rooted):
     def test_the_schema_is_appended_to_a_file_that_omits_it(self):
         self.write("judge.md.j2", "Judge {{ document }}")
 
-        @prompt(template="judge.md.j2")
+        @prompt(template="judge.md.j2", output_type=Verdict)
         def judge(document: str) -> Verdict:
             """Judge a document."""
 
@@ -127,7 +127,7 @@ class TemplateFiles(Rooted):
     def test_a_file_can_place_the_schema_itself(self):
         self.write("judge.md.j2", "{{ output_format }}\n\nJudge {{ document }}")
 
-        @prompt(template="judge.md.j2")
+        @prompt(template="judge.md.j2", output_type=Verdict)
         def judge(document: str) -> Verdict:
             """Judge a document."""
 
@@ -168,13 +168,14 @@ class Render(unittest.TestCase):
         with self.assertRaises(UndefinedError):
             typo.render("DOCBODY")
 
-    def test_the_body_can_add_computed_variables(self):
+    def test_the_body_can_return_a_postprocessed_mapping(self):
         @prompt
         def sized(document: str) -> str:
-            """{{ document }} ({{ words }} words)"""
+            """{{ document }}"""
             return {"words": len(document.split())}
 
-        self.assertIn("(2 words)", sized.render("two words"))
+        self.assertEqual(sized.render("two words"), "two words")
+        self.assertEqual(sized("two words", provider=StubProvider()), {"words": 2})
 
     def test_an_ellipsis_body_is_empty_not_a_return_value(self):
         @prompt
@@ -184,14 +185,14 @@ class Render(unittest.TestCase):
 
         self.assertEqual(bare.render("DOCBODY"), "DOCBODY")
 
-    def test_a_body_that_returns_anything_else_is_an_error(self):
+    def test_a_body_can_replace_the_generated_text(self):
         @prompt
         def wrong(document: str) -> str:
             """{{ document }}"""
             return "not a mapping"
 
-        with self.assertRaises(ValueError):
-            wrong.render("DOCBODY")
+        self.assertEqual(wrong.render("DOCBODY"), "DOCBODY")
+        self.assertEqual(wrong("DOCBODY", provider=StubProvider()), "not a mapping")
 
 
 class Decoration(unittest.TestCase):
@@ -213,7 +214,7 @@ class Decoration(unittest.TestCase):
 
 class TypedReturns(unittest.TestCase):
     def test_the_schema_is_appended_when_the_template_never_asks(self):
-        @prompt(provider=StubProvider())
+        @prompt(output_type=Verdict)
         def judge(document: str) -> Verdict:
             """{{ document }}"""
 
@@ -223,7 +224,7 @@ class TypedReturns(unittest.TestCase):
         self.assertLess(rendered.index("DOCBODY"), rendered.index("# Output Format"))
 
     def test_the_schema_lands_where_the_template_puts_it(self):
-        @prompt(provider=StubProvider())
+        @prompt(output_type=Verdict)
         def judge(document: str) -> Verdict:
             """
             {{ output_format }}
@@ -237,7 +238,7 @@ class TypedReturns(unittest.TestCase):
         self.assertLess(rendered.index("# Output Format"), rendered.index("DOCBODY"))
 
     def test_a_text_return_gets_no_schema(self):
-        @prompt(provider=StubProvider())
+        @prompt()
         def summarize(document: str) -> str:
             """{{ document }}{{ output_format }}"""
 
@@ -246,31 +247,31 @@ class TypedReturns(unittest.TestCase):
     def test_a_json_response_is_validated(self):
         model = StubProvider('{"approved": true, "reasons": []}')
 
-        @prompt(provider=model)
+        @prompt(output_type=Verdict)
         def judge(document: str) -> Verdict:
             """{{ document }}"""
 
-        verdict = judge("DOCBODY")
+        verdict = judge("DOCBODY", provider=model)
         self.assertIsInstance(verdict, Verdict)
         self.assertTrue(verdict.approved)
 
     def test_prose_around_the_json_is_rejected(self):
         model = StubProvider('Sure! {"approved": false, "reasons": ["no data"]} Hope that helps.')
 
-        @prompt(provider=model)
+        @prompt(output_type=Verdict)
         def judge(document: str) -> Verdict:
             """{{ document }}"""
 
         with self.assertRaises(ValidationError):
-            judge("DOCBODY")
+            judge("DOCBODY", provider=model)
         self.assertEqual(len(model.prompts), 1)
 
     def test_a_json_scalar_answer_is_parsed(self):
-        @prompt(provider=StubProvider('"approve"'))
+        @prompt(output_type=Literal["approve", "reject"])
         def decide(document: str) -> Literal["approve", "reject"]:
             """{{ document }}"""
 
-        self.assertEqual(decide("DOCBODY"), "approve")
+        self.assertEqual(decide("DOCBODY", provider=StubProvider('"approve"')), "approve")
 
 
 if __name__ == "__main__":

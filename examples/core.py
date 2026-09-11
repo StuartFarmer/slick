@@ -24,20 +24,22 @@ async def search_documents(query: str) -> list[str]:
 
 
 async def run(provider) -> dict:
-    @prompt(provider=provider, template="summary.j2")
+    @prompt(template="summary.j2", output_type=Summary)
     async def summarize(document: str) -> Summary:
         """Summarize a document into a headline and points."""
 
-    @prompt(provider=provider, template="conversation.j2")
+    @prompt(template="conversation.j2")
     async def reply(question: str, messages: list[dict]) -> str:
         """Answer using the supplied history."""
 
-    summary = await summarize("Slick renders Jinja, calls a provider, and parses the result.")
+    summary = await summarize(
+        "Slick renders Jinja, calls a provider, and parses the result.", provider=provider
+    )
     history = [
         {"role": "user", "content": "My name is Ada."},
         {"role": "assistant", "content": "Hello, Ada."},
     ]
-    conversation = await reply("Do you remember my name?", history)
+    conversation = await reply("Do you remember my name?", history, provider=provider)
 
     question = "How can I supply history?"
     documents = await search_documents(question)

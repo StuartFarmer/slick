@@ -43,7 +43,7 @@ def provider_from_args(args, argument_parser, demo):
     return provider(model=args.model, timeout=args.timeout)
 
 
-class ScriptedProvider:
+class ScriptedProvider(providers.Provider):
     """Offline responses; loops still render, parse, execute tools, and update state."""
 
     def __init__(self, responses):

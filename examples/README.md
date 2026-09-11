@@ -53,7 +53,7 @@ prompt declared with `@prompt`. Each call generates before running its Python bo
 4. `revise(draft, feedback, provider=...)` returns a new plan using the original assessments and your feedback.
 
 `run()` runs both assessments concurrently, waits for them, then generates the plan:
-three model calls in total. The provider must support concurrent calls. Each assessment
+three model calls when no tools are requested. The provider must support concurrent calls. Each assessment
 contains source quotations, which Python checks against the supplied paper. Missing
 information stays visible as plain questions; proposed choices are listed as assumptions.
 Tasks are an ordered list, with no IDs, routes, or dependency graph.
@@ -77,17 +77,40 @@ revised = await planner.revise(
 print(format_report(revised))
 ```
 
-Direct calls to any decorated method require `provider=`; `run()` passes the planner's
-current provider to each step. Function bodies check generated evidence or wrap the
+Direct calls to decorated methods require either `provider=` or `session=`.
+Assessments use the planner's provider directly. Generation and review revisions
+use an optional caller-supplied session, or a fresh session with that provider.
+Function bodies check generated evidence or wrap the
 generated plan. Revision uses `@validate_call` to reject blank feedback before generation
 and preserves the original draft. Provider errors, invalid JSON, and invalid
 quotations propagate to the caller. Pydantic validates the output structure; it does
 not establish scientific correctness or plan completeness. Your application decides
 whether to retry, approve, or save a result with `result.model_dump()`.
 
+To let planning inspect project constraints, supply a session with ordinary tools:
+
+```python
+from slick import Session
+
+def project_notes() -> str:
+    """Read the project's implementation constraints."""
+    return Path("PROJECT.md").read_text(encoding="utf-8")
+
+session = Session(provider=provider, tools=[project_notes])
+draft = await planner.run(session=session)
+revised = await planner.revise(draft, "Check project constraints.", session=session)
+# Or pass session=session to planner.review(draft, inbox).
+```
+
+Generation and revision decorators allow up to 20 model turns. The session runs
+requested tools and feeds results back before the body receives a typed `Plan`.
+The assessments remain paper-only; the supplied session retains planning history
+across revisions. A `Workflow` records individual model exchanges and completed
+tools, so an interrupted conversation resumes with its prior results.
+
 The shared `--provider`, `--model`, and `--timeout` options work as above. The example
-reads the entire paper, so it must fit the model's context window. It does not browse
-links or execute experiments. CLI providers retain their own harness capabilities,
+reads the entire paper, so it must fit the model's context window. By default it does
+not browse links or execute experiments. CLI providers retain their own harness capabilities,
 although these prompts request paper-only analysis. The offline demo contains only
 the three initial responses; use a real provider for revisions or your own paper.
 

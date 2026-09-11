@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field, StringConstraints, model_validator, validate_call
 
 from examples._cli import ScriptedProvider, parser, provider_from_args
-from slick import Inbox, Prompt, Workflow, prompt, workflow
+from slick import Inbox, Prompt, Session, Workflow, prompt, workflow
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -75,19 +75,19 @@ class PaperPlanner:
         check_evidence(generated, self.paper)
         return generated
 
-    @prompt(template="paper_plan/plan.j2", output_type=Plan)
+    @prompt(template="paper_plan/plan.j2", output_type=Plan, max_turns=20)
     async def generate_plan(
         self, method: Assessment, evaluation: Assessment, *, generated: Plan
     ) -> PaperPlan:
         return PaperPlan(method=method, evaluation=evaluation, plan=generated)
 
     @validate_call
-    @prompt(template="paper_plan/revise.j2", output_type=Plan)
+    @prompt(template="paper_plan/revise.j2", output_type=Plan, max_turns=20)
     async def revise(self, draft: PaperPlan, feedback: Text, *, generated: Plan) -> PaperPlan:
         """Validate inputs before generation, then wrap the new plan without changing the draft."""
         return PaperPlan(method=draft.method, evaluation=draft.evaluation, plan=generated)
 
-    async def run(self) -> PaperPlan:
+    async def run(self, *, session: Session | None = None) -> PaperPlan:
         # Let both assessments finish before propagating either failure.
         assessments = await asyncio.gather(
             self.assess_method(provider=self.provider),
@@ -98,10 +98,14 @@ class PaperPlanner:
             if isinstance(assessment, BaseException):
                 raise assessment
         method, evaluation = assessments
-        return await self.generate_plan(method, evaluation, provider=self.provider)
+        return await self.generate_plan(
+            method, evaluation, session=session or Session(provider=self.provider)
+        )
 
     @workflow
-    async def review(self, draft: PaperPlan, inbox: Inbox) -> PaperPlan | None:
+    async def review(
+        self, draft: PaperPlan, inbox: Inbox, *, session: Session | None = None
+    ) -> PaperPlan | None:
         """Wait for review; publish each revision on a fresh channel."""
         while True:
             decision = await inbox.request(draft, output_type=ReviewDecision)
@@ -109,7 +113,9 @@ class PaperPlanner:
                 return draft
             if decision.action == "reject":
                 return None
-            draft = await self.revise(draft, decision.feedback, provider=self.provider)
+            draft = await self.revise(
+                draft, decision.feedback, session=session or Session(provider=self.provider)
+            )
 
 
 def format_report(result: PaperPlan) -> str:

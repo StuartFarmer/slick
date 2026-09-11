@@ -46,7 +46,8 @@ def test_generation_precedes_body_and_output_type_is_separate_from_return_type(a
     assert invoke(fn, asynchronous, "input", provider=Provider()) == "input: 8"
     assert events == ["generation", "body"]
     assert "generated" not in inspect.signature(fn).parameters
-    assert inspect.signature(fn).parameters["provider"].default is inspect.Parameter.empty
+    assert inspect.signature(fn).parameters["provider"].default is None
+    assert inspect.signature(fn).parameters["session"].default is None
 
 
 def test_instance_binding_provider_switching_and_reserved_arguments():

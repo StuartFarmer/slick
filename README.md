@@ -239,7 +239,7 @@ for request in requests:
 ```
 
 `acall()` performs one model call and never executes tools. The application owns
-its loop, stopping conditions and context selection. Session sends exactly the
+its loop, stopping conditions and context selection. `acall()` sends exactly the
 context supplied; it never automatically replays, summarizes or renders history.
 Use Jinja to render whichever observations your application needs. Recorded
 `exchange["context"]` is the full prompt already sent, so don't recursively insert
@@ -280,6 +280,35 @@ supply it explicitly. Types supported by `parse`, such as Pydantic models and
 History retains the rendered context and raw response, including when parsing
 fails. Tool requests remain pending for the caller to resolve or cancel; neither
 method executes them. Ready tool results are submitted just as with `acall()`.
+
+Use `run()` or `arun()` for an automatic tool conversation:
+
+```python
+assessment = await session.arun(
+    Prompt("assess.j2"), output_type=Assessment, max_turns=20, paper=paper,
+)
+text = await session.arun("Explain the assessment.")
+# session.run(...) is the synchronous equivalent; it requires synchronous tools.
+```
+
+These methods execute requested tools sequentially, send their results back, and
+continue until a final answer. They return the final text or parsed value directly.
+Intermediate text stays in `history`; only the final answer is parsed. `max_turns`
+defaults to 20 and limits model calls, not individual tools. Exhausting it raises
+`RuntimeError` and leaves the last turn's tools pending. Call `await session.arun()`
+to resume with a new budget, or inspect and cancel pending work first. A failed
+final parse retains the answer; `await session.arun()` retrieves its raw text.
+
+API sessions preserve native conversation messages and opaque reasoning fields.
+OpenAI sessions request encrypted reasoning for stateless continuation, and Anthropic
+sessions retain thinking blocks and signatures unchanged; see the
+[OpenAI reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) and
+[Anthropic thinking guide](https://platform.claude.com/docs/en/build-with-claude/extended-thinking).
+Provider truncation or other incomplete termination raises instead of returning a
+partial answer; Anthropic `pause_turn` continues within the budget. Custom providers
+with only `call/acall` receive a JSON transcript of previous text and tool work.
+Each successful run adds to the session's conversation. Use a fresh session for
+independent work; keep manual `acall/aprompt` exchanges in a separate session.
 
 | Property | Contents |
 | --- | --- |
@@ -332,8 +361,13 @@ are not serialized. Save between operations, including between tools in a batch.
 This does not guarantee exactly-once external effects across a crash before a
 tool's result is recorded.
 
+Automatic conversations also save their continuation and pending run in the snapshot.
+Restore with the same API provider kind and model, reconnect tools, and call `arun()`
+to continue. Native continuation cannot be moved to a different provider or model.
+
 Session allows one operation at a time per instance. `prompt()` is synchronous;
-`aprompt()`, `acall()`, and tool resolution are asynchronous. Sync tools run inline
+`run()` is synchronous too; `arun()`, `aprompt()`, `acall()`, and tool resolution are
+asynchronous. Sync tools run inline
 as they do with `Tool.ainvoke`; concurrency and process pools remain future
 additions. Provider clients belong to the application, and Session does not close
 them. Raw `provider.call/acall` remains available independently.
@@ -344,8 +378,8 @@ Run the complete offline example with `python -m examples.session`, or see the
 ## Executing decorator
 
 `@prompt` renders the function inputs, calls the provider, parses the response,
-then executes the function body. Supply `provider=` on every call; the decorator
-never stores or selects a provider implicitly.
+then executes the function body. Supply exactly one of `provider=` or `session=`
+on every call; the decorator never stores or selects either implicitly.
 
 ```python
 from pydantic import BaseModel
@@ -392,24 +426,38 @@ async def answer(question: str) -> str:
 text = await answer("What is a closure?", provider=model)
 ```
 
-Tool requests are discarded by the decorator. Use `provider.prompt/aprompt` or
+With `provider=`, the decorator makes one call and discards tool requests.
+With `session=`, it runs the tool conversation before parsing and running the body:
+
+```python
+@prompt(template="summarize.j2", output_type=Summary, max_turns=20)
+async def summarize(document: str, *, generated: Summary) -> str:
+    return generated.headline
+
+text = await summarize(document, session=Session(provider=model, tools=[search]))
+```
+
+The session supplies the provider, tools, and conversation history. `max_turns`
+applies only to session execution. Use `provider.prompt/aprompt` or
 `Session.prompt/aprompt` when you need `(result, tool_requests)`. Provider and parsing
 failures skip the body; body errors also propagate. Nothing retries automatically.
 For input validation before generation, put Pydantic's `@validate_call` outside
 `@prompt`, as shown in [paper_plan.py](examples/paper_plan.py).
 
-Ordinary parameters and defaults become template data. `provider` and `generated`
+Ordinary parameters and defaults become template data. `provider`, `session`, and `generated`
 are reserved. Bound methods work normally; templates access the bound `self` as
 `instance`, because Jinja reserves `self` for its template object. For example,
 `{{ instance.paper }}` reads a planner's paper, and `{{ draft.plan.model_dump() | tojson }}`
-serializes a supplied draft. Calling a method still requires an explicit provider:
+serializes a supplied draft. Methods accept either execution resource:
 
 ```python
 revised = await planner.revise(draft, feedback, provider=model)
+revised = await planner.revise(draft, feedback, session=session)
 ```
 
-A `def` uses `provider.call`; an `async def` uses `provider.acall` and awaits the
-postprocessing body. Unsupported modes fail; Slick does not start an event loop
+A `def` uses `provider.call` or `session.run`; an `async def` uses `provider.acall`
+or `session.arun` and awaits the postprocessing body. Unsupported modes fail;
+Slick does not start an event loop
 or run a blocking provider in a hidden thread.
 
 ```python
@@ -668,17 +716,17 @@ internally. OpenAI uses `function_call_output`, Anthropic uses `tool_result`, an
 Chat Completions uses tool-role messages. OpenAI definitions use `strict=False`
 to retain Python optional/default arguments.
 
-This portable interface covers text and local function tools. It does not expose
-usage metadata, hosted tools, media, or native reasoning replay. Decoders extract
-text and function calls and ignore other blocks, including reasoning data.
+The portable `call/acall` interface covers text and local function tools. It does
+not expose usage metadata, hosted tools, media, or native reasoning replay.
+Its decoders extract text and function calls and ignore other blocks. API-provider
+`turn/aturn` methods additionally return native continuation data and completion
+status for `Session.run/arun`; the session owns that state, not the provider.
 Command providers use only the context and return `(text, [])`; `tools` and
 `tool_results` are ignored.
 
-The former `aturn`, turn dataclasses, and provider history validation have been
-removed. Migrate string consumers to `text, requests = ...`; prompt decorators
-still return their declared Python output type and reject pending tool requests
-before parsing or caching. `Prompt`, `render`, and `parse` remain independent
-text operations.
+There are no turn dataclasses. Use `text, requests = ...` for single provider calls;
+prompt decorators return their generated or postprocessed Python value.
+`Prompt`, `render`, and `parse` remain independent text operations.
 
 The [coding harness example](examples/coding_harness/README.md) adds error recovery,
 cancellation, workspace tools, verification, saved conversations, and a TUI around
@@ -687,7 +735,8 @@ an explicit provider/tool loop. Run its offline demo with
 
 ## Execution and persistence
 
-`@prompt` renders, calls the per-call `provider=`, parses the response, and runs the body.
+`@prompt` renders, executes through the supplied provider or session, parses the final
+response, and runs the body.
 Applications own caching, logging, output files, and retries. Custom providers only
 need `call` or `acall`; the decorator does not require `identity()`.
 
@@ -695,8 +744,8 @@ The decorator no longer accepts `cache=` or `log_dir=`, and `LOG_DIR` is removed
 `output` is now an ordinary template argument, with no file-writing behavior.
 The `.source()`, `.template_name`, and `.returns` inspection attributes are also
 removed; `.render()` remains available, and the wrapped function retains its
-return annotation and docstring. Its public signature includes the required
-`provider=` argument and excludes the injected `generated` argument.
+return annotation and docstring. Its public signature includes `provider=None` and
+`session=None`, requires exactly one at runtime, and excludes the injected `generated` argument.
 
 For file output, write the returned string in application code, or serialize a
 typed result explicitly. To preserve a model's exact JSON text, use
@@ -823,9 +872,13 @@ execution identity. No `run.step()` calls or application checkpoint models are n
 
 Awaited functions use their return annotations to restore typed results, including
 Pydantic models. Unannotated functions may return only JSON-native values. An inbox
-request uses its `output_type` instead. Results are serialized and reconstructed;
-object identity and mutations to supplied objects, including `Session` history,
-are not restored.
+request uses its `output_type` instead. Results are serialized and reconstructed.
+Session arguments and bound Session methods also save snapshots atomically with
+their results. Replay restores those snapshots into the supplied live sessions.
+`Session.arun()` checkpoints each model exchange and each completed tool, including
+when called through `@prompt`. Supply fresh sessions with the same provider/model
+and tools on restart. Other object mutations and sessions hidden in arbitrary
+object attributes are not restored automatically.
 
 The initial subset supports assignments, expressions, `if`, ordinary `for`/`while`
 loops, `break`, `continue`, `return`, `raise`, and direct awaited async function calls.

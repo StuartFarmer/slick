@@ -1,11 +1,14 @@
 """Automatic interaction bookkeeping around explicit provider and tool calls."""
 
+import asyncio
+import json
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import Annotated, Any
+from threading import get_ident
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, ConfigDict, TypeAdapter
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from .prompts import Prompt, _render_prompt, parse
 from .tools import Tool, ToolError, ToolRequest, ToolResult, prepare_tools
@@ -27,9 +30,17 @@ class _Exchange(TypedDict):
     work: list[_Work]
 
 
+class _Run(TypedDict):
+    __pydantic_config__ = SNAPSHOT_CONFIG
+    context: str
+    status: Literal["start", "tools", "continue", "complete", "incomplete"]
+
+
 class _SnapshotFields(TypedDict):
     __pydantic_config__ = SNAPSHOT_CONFIG
     history: list[_Exchange]
+    continuation: NotRequired[dict[str, Any]]
+    run: NotRequired[_Run]
 
 
 def _valid_snapshot(snapshot):
@@ -73,6 +84,14 @@ async def _invoke(request, tools):
     return _result(request, content)
 
 
+def _owner():
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        task = None
+    return get_ident(), task
+
+
 class Session:
     """Own interaction history and tool work; the application supplies context.
 
@@ -85,16 +104,171 @@ class Session:
         self._tools = prepare_tools([] if tools is None else tools)
         self._history: list[dict] = []
         self._busy = False
+        self._running = None
+        self._continuation = None
+        self._run = None
 
     @contextmanager
     def _operation(self):
-        if self._busy:
+        if self._busy or (self._running is not None and self._running != _owner()):
             raise RuntimeError("A Session operation is already active")
         self._busy = True
         try:
             yield
         finally:
             self._busy = False
+
+    @contextmanager
+    def _run_guard(self):
+        if self._busy or self._running is not None:
+            raise RuntimeError("A Session operation is already active")
+        self._running = _owner()
+        try:
+            yield
+        finally:
+            self._running = None
+
+    def _start(self, prompt, output_type, max_turns, variables):
+        if type(max_turns) is not int or max_turns < 1:
+            raise ValueError("max_turns must be a positive integer")
+        if prompt is None:
+            if self._run is None:
+                raise ValueError("Supply a prompt to start a conversation")
+            if variables:
+                raise ValueError("Cannot supply template variables when resuming")
+            return
+        if isinstance(prompt, Prompt):
+            context = _render_prompt(prompt, output_type, variables)
+        elif isinstance(prompt, str) and not variables:
+            context = prompt
+        else:
+            raise TypeError("Supply a Prompt with variables or already rendered text")
+        if self._run is not None and self._run["context"] != context:
+            raise ValueError(
+                "A different conversation is pending; resume it before starting another"
+            )
+        if self._run is None:
+            self._run = {"context": context, "status": "start"}
+
+    def _finish(self, output_type):
+        result = parse(self._history[-1]["text"], str if output_type is None else output_type)
+        self._run = None
+        return result
+
+    def _check_status(self):
+        if self._run["status"] == "incomplete":
+            raise RuntimeError(
+                "Provider stopped before completing the conversation; inspect history"
+            )
+
+    def run(self, prompt=None, /, *, output_type=None, max_turns=20, **variables):
+        """Run a bounded synchronous tool conversation and parse its final answer.
+
+        Omit prompt to resume a paused run. max_turns limits additional provider
+        calls; reaching it leaves requested tools unexecuted for explicit continuation.
+        """
+        with self._run_guard():
+            self._start(prompt, output_type, max_turns, variables)
+            if self._run["status"] == "complete":
+                return self._finish(output_type)
+            self._check_status()
+            for _ in range(max_turns):
+                for request in self.pending_requests:
+                    self._resolve_sync(request)
+                self._turn()
+                self._check_status()
+                if self._run["status"] == "complete":
+                    return self._finish(output_type)
+            raise RuntimeError(f"Session reached its {max_turns}-turn limit; resume to continue")
+
+    async def arun(self, prompt=None, /, *, output_type=None, max_turns=20, **variables):
+        """Like run(), awaiting providers and tools; checkpoint each operation in a workflow."""
+        with self._run_guard():
+            self._start(prompt, output_type, max_turns, variables)
+            if self._run["status"] == "complete":
+                return self._finish(output_type)
+            self._check_status()
+            for _ in range(max_turns):
+                for request in self.pending_requests:
+                    await self._astep("tool", self.resolve, request)
+                await self._astep("turn", self._aturn)
+                self._check_status()
+                if self._run["status"] == "complete":
+                    return self._finish(output_type)
+            raise RuntimeError(f"Session reached its {max_turns}-turn limit; resume to continue")
+
+    async def _astep(self, name, function, *args):
+        from .workflow import _current, _invoke
+
+        if _current.get() is not None:
+            return await _invoke(f"session:{name}", function, args, {})
+        return await function(*args)
+
+    def _turn_input(self, native):
+        context = self._run["context"] if self._run["status"] == "start" else ""
+        if native:
+            return context
+        if self._continuation is not None:
+            raise ValueError("A native conversation requires a compatible provider")
+        # Custom call/acall providers get a portable transcript without recursively nested context.
+        transcript = [{"text": item["text"], "work": item["work"]} for item in self._history]
+        return self._run["context"] + (
+            "\n\nConversation so far:\n" + json.dumps(transcript) if transcript else ""
+        )
+
+    def _accept_turn(self, context, response, native):
+        if native:
+            result = self._record_response(context, (response["text"], response["requests"]))
+            self._continuation = deepcopy(response["continuation"])
+            self._run["status"] = response["status"]
+        else:
+            result = self._record_response(context, response)
+            self._run["status"] = "tools" if result[1] else "complete"
+        return result
+
+    async def _aturn(self) -> tuple[str, list[dict]]:
+        with self._operation():
+            provider = self._prepare_call(None)
+            native = getattr(provider, "aturn", None)
+            context = self._turn_input(native)
+            kwargs = {"tools": self.tools, "tool_results": self.ready_results}
+            response = (
+                await native(context, continuation=deepcopy(self._continuation), **kwargs)
+                if native
+                else await provider.acall(context, **kwargs)
+            )
+            return self._accept_turn(context, response, native)
+
+    def _turn(self):
+        with self._operation():
+            provider = self._prepare_call(None)
+            native = getattr(provider, "turn", None)
+            context = self._turn_input(native)
+            kwargs = {"tools": self.tools, "tool_results": self.ready_results}
+            response = (
+                native(context, continuation=deepcopy(self._continuation), **kwargs)
+                if native
+                else provider.call(context, **kwargs)
+            )
+            return self._accept_turn(context, response, native)
+
+    def _resolve_sync(self, request):
+        with self._operation():
+            work = next(work for work in self._work if work["request"] == request)
+            if request.get("argument_error"):
+                result = _result(request, request["argument_error"], error=True)
+            elif request["name"] not in self._tools:
+                result = _result(request, f"Unknown tool: {request['name']}", error=True)
+            else:
+                try:
+                    result = _result(
+                        request, self._tools[request["name"]].invoke(request["arguments"])
+                    )
+                except ToolError as error:
+                    result = _result(
+                        request, f"{error}; effects may have occurred; inspect state", error=True
+                    )
+            work["result"] = result
 
     @property
     def _work(self):
@@ -235,7 +409,19 @@ class Session:
     def to_dict(self) -> dict:
         """Return an idle, JSON-compatible snapshot; no clients or functions."""
         with self._operation():
-            return {"history": self.history}
+            snapshot = {"history": self.history}
+            if self._continuation is not None:
+                snapshot["continuation"] = deepcopy(self._continuation)
+            if self._run is not None:
+                snapshot["run"] = deepcopy(self._run)
+            return snapshot
+
+    def _restore(self, data):
+        with self._operation():
+            snapshot = _snapshot.dump_python(_snapshot.validate_python(data), exclude_unset=True)
+            self._history = deepcopy(snapshot["history"])
+            self._continuation = deepcopy(snapshot.get("continuation"))
+            self._run = deepcopy(snapshot.get("run"))
 
     @classmethod
     def from_dict(cls, data: dict, *, provider=None, tools=None) -> "Session":
@@ -244,9 +430,6 @@ class Session:
         Loading performs no provider calls or tool execution. Pending work stays
         pending and completed work retains its recorded results.
         """
-        history = _snapshot.dump_python(_snapshot.validate_python(data), exclude_unset=True)[
-            "history"
-        ]
         session = cls(provider=provider, tools=tools)
-        session._history = history
+        session._restore(data)
         return session

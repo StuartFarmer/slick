@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from examples import paper_plan as example
 from examples._cli import ScriptedProvider
-from slick import Inbox, Provider, Workflow, prompts, workflow
+from slick import Inbox, Provider, Session, Workflow, prompts, workflow
 
 
 def test_assessments_run_concurrently_before_generation(monkeypatch):
@@ -34,7 +34,8 @@ def test_assessments_run_concurrently_before_generation(monkeypatch):
                     assert json.loads(method)["summary"] in context
                     assert json.loads(evaluation)["summary"] in context
                     answer = plan
-                return answer, [{"id": "unused", "name": "unused", "arguments": {}}]
+                requests = [{"id": "unused", "name": "unused", "arguments": {}}]
+                return answer, requests if context.startswith("Assess") else []
 
         planner = example.PaperPlanner(example.DEMO_PAPER, OfflineProvider())
         result = await asyncio.wait_for(planner.run(), 1)
@@ -78,6 +79,33 @@ def test_revision_uses_feedback_without_reassessment_or_mutating_the_draft(monke
         with pytest.raises(ValidationError):
             await planner.revise(original, "   ", provider=planner.provider)
         assert len(contexts) == 2
+
+    asyncio.run(scenario())
+
+
+def test_planning_and_revision_use_the_supplied_tool_session(monkeypatch):
+    monkeypatch.setattr(prompts, "TEMPLATE_ROOT", Path(example.__file__).with_name("prompts"))
+    from test_session_run import Script
+
+    async def scenario():
+        calls = []
+
+        def project_notes() -> str:
+            """Read the project's implementation constraints."""
+            calls.append("notes")
+            return "Use the Python standard library."
+
+        method, evaluation, plan = list(example.demo_provider().responses)
+        tool_request = {"id": "notes", "name": "project_notes", "arguments": {}}
+        model = Script(("Checking constraints", [tool_request]), (plan, []), (plan, []))
+        session = Session(provider=model, tools=[project_notes])
+        planner = example.PaperPlanner(example.DEMO_PAPER, ScriptedProvider([method, evaluation]))
+        draft = await planner.run(session=session)
+        revised = await planner.revise(draft, "Keep it simple.", session=session)
+        assert revised == draft
+        assert calls == ["notes"]
+        assert "Use the Python standard library." in model.inputs[1][0]
+        assert len(session.history) == 3
 
     asyncio.run(scenario())
 

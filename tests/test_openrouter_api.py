@@ -61,7 +61,6 @@ def test_openrouter_routes_and_authenticates_at_call_time(monkeypatch, asynchron
         "provider": "openrouter",
         "model": "vendor/model",
     }
-    assert not hasattr(provider, "aturn")
 
 
 def test_openrouter_requires_its_own_key(monkeypatch):

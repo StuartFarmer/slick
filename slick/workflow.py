@@ -91,6 +91,10 @@ class Workflow:
                     target TEXT NOT NULL, schema TEXT NOT NULL, result TEXT NOT NULL,
                     PRIMARY KEY (run_id, position)
                 );
+                CREATE TABLE IF NOT EXISTS workflow_sessions (
+                    run_id TEXT NOT NULL, position TEXT NOT NULL, snapshots TEXT NOT NULL,
+                    PRIMARY KEY (run_id, position)
+                );
             """)
 
     async def __aenter__(self):
@@ -165,6 +169,8 @@ def _prepare(site, function):
 
 
 async def _invoke(site, function, args, kwargs):
+    from .session import Session
+
     frame = _current.get()
     position = frame.next(f"await:{site}")
     is_request = getattr(function, "__func__", None) is Inbox.request
@@ -173,7 +179,17 @@ async def _invoke(site, function, args, kwargs):
         kwargs.setdefault("key", key)
         result_type = kwargs.get("output_type") or Any
     else:
-        result_type = get_type_hints(inspect.unwrap(function)).get("return", Any)
+        fallback = getattr(function, "_prompt_output_type", None) or Any
+        result_type = get_type_hints(inspect.unwrap(function)).get("return", fallback)
+    method = getattr(function, "__func__", None)
+    if method is Session.arun:
+        result_type = kwargs.get("output_type") or str
+    elif method is Session.aprompt:
+        result_type = tuple[kwargs.get("output_type") or str, list[dict]]
+    bindings = {f"arg:{index}": value for index, value in enumerate(args)}
+    bindings.update({f"kw:{key}": value for key, value in kwargs.items()})
+    bindings["self"] = getattr(function, "__self__", None)
+    sessions = {key: value for key, value in bindings.items() if isinstance(value, Session)}
     adapter = TypeAdapter(result_type)
     schema = _json(adapter.json_schema())
     name = _name(function)
@@ -185,9 +201,18 @@ async def _invoke(site, function, args, kwargs):
             "SELECT target, schema, result FROM workflow_results WHERE run_id = ? AND position = ?",
             (run.run_id, location),
         ).fetchone()
+        saved_sessions = connection.execute(
+            "SELECT snapshots FROM workflow_sessions WHERE run_id = ? AND position = ?",
+            (run.run_id, location),
+        ).fetchone()
     if row is not None:
         if row[:2] != (target, schema):
             raise WorkflowError("Recorded call has a different function or output type")
+        snapshots = json.loads(saved_sessions[0]) if saved_sessions is not None else {}
+        if snapshots.keys() != sessions.keys():
+            raise WorkflowError("Recorded call has different Session bindings")
+        for key, snapshot in snapshots.items():
+            sessions[key]._restore(snapshot)
         return adapter.validate_json(row[2])
     token = _current.set(_Frame(run, position, frame.task))
     try:
@@ -201,6 +226,7 @@ async def _invoke(site, function, args, kwargs):
     result = adapter.validate_python(result, strict=True)
     payload = adapter.dump_json(result).decode()
     restored = adapter.validate_json(payload)  # Never commit a result that cannot be restored.
+    snapshots = {key: session.to_dict() for key, session in sessions.items()}
     # No await between completion and commit: coroutine cancellation cannot split this boundary.
     with run.inbox._connect() as connection:
         connection.execute(
@@ -208,6 +234,11 @@ async def _invoke(site, function, args, kwargs):
             "VALUES (?, ?, ?, ?, ?)",
             (run.run_id, location, target, schema, payload),
         )
+        if snapshots:
+            connection.execute(
+                "INSERT INTO workflow_sessions (run_id, position, snapshots) VALUES (?, ?, ?)",
+                (run.run_id, location, _json(snapshots)),
+            )
     return restored
 
 
